@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import (
     QGroupBox, QScrollArea, QTextEdit,
     QFileDialog, QProgressBar, QTabWidget,
     QSizePolicy, QFrame, QAction, QToolBar,
-    QStatusBar, QMessageBox,
+    QStatusBar, QMessageBox, QMenu,
 )
 from PyQt5.QtCore  import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui   import QFont, QColor, QPalette, QIcon, QSurfaceFormat
@@ -133,6 +133,11 @@ def apply_dark_theme(app: QApplication):
     """)
 
 
+def _tt(texto: str) -> str:
+    """Envuelve el texto en rich-text para que el tooltip haga word-wrap."""
+    return f"<qt>{texto}</qt>"
+
+
 # ══════════════════════════════════════════════════════════════════════════════
 #  WORKER THREAD
 # ══════════════════════════════════════════════════════════════════════════════
@@ -188,12 +193,16 @@ class WorkerThread(QThread):
         })
 
     def _run_reconstruct(self):
-        self.log_signal.emit("━━━ BLOQUE C: Reconstrucción ━━━")
+        self.log_signal.emit("━━━ BLOQUE B: Reconstrucción ━━━")
         self.progress_signal.emit(5)
         pcd = self.data["point_cloud"]
         rec = MeshReconstructor(pcd, log_callback=self.log_signal.emit)
         self.progress_signal.emit(20)
         mesh, stats = rec.run(self.params)
+        # Cierre topológico calculado aquí (en el hilo worker) para que la
+        # etiqueta "Watertight" de la GUI muestre el valor real sin
+        # congelar la interfaz.
+        stats["is_closed"] = MeshSolidifier.is_topologically_closed(mesh)
         self.progress_signal.emit(100)
         self.log_signal.emit(
             f"  📊 Malla: {stats['final_vertices']:,} vért, "
@@ -207,7 +216,7 @@ class WorkerThread(QThread):
         })
 
     def _run_solidify(self):
-        self.log_signal.emit("━━━ BLOQUE D: Solidificación ━━━")
+        self.log_signal.emit("━━━ BLOQUE C: Solidificación ━━━")
         self.progress_signal.emit(5)
         mesh = self.data["mesh"]
         sol  = MeshSolidifier(mesh, log_callback=self.log_signal.emit)
@@ -377,6 +386,80 @@ class ParamPanel(QScrollArea):
         lay.addWidget(g_nrm)
 
         lay.addStretch()
+
+        # ── Tooltips explicativos ───────────────────────────────────────
+        # d̄ = mediana de la distancia al vecino más cercano (la resolución
+        # real de la nube); los umbrales espaciales se expresan como ×d̄.
+        tips = {
+            self.pre_remove_invalid:
+                "Elimina puntos con coordenadas NaN o infinitas (mediciones "
+                "fallidas del escáner). No cuesta nada: dejar siempre activado.",
+            self.pre_remove_origin:
+                "Elimina puntos exactamente en (0,0,0), donde muchos escáneres "
+                "láser registran los retornos fallidos. Desactivar solo si el "
+                "objeto realmente tiene puntos en el origen.",
+            self.pre_dedup_enabled:
+                "Fusiona puntos duplicados o casi coincidentes. Útil cuando se "
+                "combinan varios escaneos de la misma zona.",
+            self.pre_dedup_factor:
+                "Distancia (× d̄) bajo la cual dos puntos se consideran el "
+                "mismo. 0.1 = solo duplicados casi exactos; 0.3+ ya reduce "
+                "densidad. Típico: 0.2.",
+            self.ror_enabled:
+                "Radius Outlier Removal: elimina puntos con pocos vecinos "
+                "dentro de un radio — ruido disperso y puntos «voladores».",
+            self.ror_factor:
+                "Radio de búsqueda (× d̄). Más grande = más tolerante "
+                "(elimina menos). Típico: 2–3.",
+            self.ror_min_neighbors:
+                "Mínimo de vecinos dentro del radio para conservar el punto. "
+                "Subirlo limpia más ruido, pero puede comerse bordes y zonas "
+                "poco densas.",
+            self.sor_enabled:
+                "Statistical Outlier Removal: elimina puntos cuya distancia "
+                "media a sus k vecinos se aleja estadísticamente del resto. "
+                "Bueno contra ruido difuso general.",
+            self.sor_k:
+                "Vecinos usados para calcular la distancia media de cada "
+                "punto. Típico: 20.",
+            self.sor_std:
+                "Umbral en desviaciones estándar (σ): menor = más agresivo. "
+                "2.0 es equilibrado; 1.0 elimina bastante más.",
+            self.pre_voxel_enabled:
+                "Uniforma la densidad conservando un punto por celda de "
+                "rejilla. Acelera el pipeline y estabiliza la reconstrucción.",
+            self.pre_voxel_factor:
+                "Tamaño de celda (× d̄). 1.0–1.5 casi no pierde detalle; 3+ "
+                "reduce fuerte la nube. Si la reconstrucción pierde detalle "
+                "fino, bajar este factor.",
+            self.pre_denoise_enabled:
+                "Suavizado Moving Least Squares: proyecta cada punto sobre "
+                "una superficie local ajustada. Reduce rugosidad sin encoger "
+                "el objeto.",
+            self.pre_denoise_iter:
+                "Más iteraciones = superficie más lisa, pero puede borrar "
+                "detalle fino. 1–2 suele bastar.",
+            self.pre_denoise_k:
+                "Vecinos usados para ajustar la superficie local. Más "
+                "vecinos = suavizado más amplio.",
+            self.pre_preserve_edges:
+                "Reduce el suavizado cerca de aristas y esquinas detectadas "
+                "para no redondearlas.",
+            self.pre_normal_factor:
+                "Radio de búsqueda para estimar normales (× voxel). Muy "
+                "chico = normales ruidosas; muy grande = normales «lavadas» "
+                "en los detalles.",
+            self.pre_normal_max_nn:
+                "Tope de vecinos por punto al estimar la normal (limita el "
+                "costo computacional).",
+            self.pre_orient_k:
+                "Vecinos del grafo usado para orientar las normales de forma "
+                "consistente (hacia afuera). Crucial para Poisson: normales "
+                "mal orientadas producen burbujas y superficies dobles.",
+        }
+        for w, tip in tips.items():
+            w.setToolTip(_tt(tip))
+
         self.tabs.addTab(tab, "A · Pre")
 
     def _build_rec_tab(self):
@@ -472,7 +555,56 @@ class ParamPanel(QScrollArea):
         lay.addWidget(g_smooth)
         lay.addStretch()
 
-        self.tabs.addTab(tab, "C · Rec")
+        # ── Tooltips explicativos ───────────────────────────────────────
+        tips = {
+            self.rec_method:
+                "<b>poisson</b>: superficie implícita, cerrada y suave — la "
+                "mejor opción general.<br><b>ball_pivoting</b>: triangula los "
+                "puntos reales (fiel a los datos, pero deja agujeros)."
+                "<br><b>alpha_shape</b>: envolvente ajustada, útil para "
+                "formas simples.",
+            self.poisson_depth:
+                "Profundidad del octree = resolución de la superficie. 8–9 "
+                "para objetos simples, 10–11 para detalle fino. Cada +1 "
+                "duplica la resolución y multiplica triángulos y tiempo.",
+            self.bp_radius:
+                "Radio de la esfera pivotante de Ball Pivoting (en unidades "
+                "de la nube; también se usa radio×2). Orientativo: 2–4× la "
+                "distancia media entre puntos.",
+            self.alpha_val:
+                "Alpha de la envolvente: menor = más ajustada al detalle "
+                "(puede fragmentarse); mayor = más gruesa y cerrada.",
+            self.alpha_ds:
+                "Submuestreo previo para Alpha Shape (1 = usar todos los "
+                "puntos). Subirlo acelera a costa de detalle.",
+            self.remove_webbing:
+                "Elimina las «telas fantasma» que Poisson genera al puentear "
+                "zonas sin datos (triángulos de baja densidad o lejos de la "
+                "nube). Recomendado con Poisson.",
+            self.remove_hollow:
+                "Elimina paredes internas espurias: triángulos con puntos de "
+                "la nube claramente a ambos lados (señal de doble pared). El "
+                "radio de análisis se adapta a la escala de la nube.",
+            self.smooth_method:
+                "<b>taubin</b>: suaviza SIN encoger el objeto (recomendado)."
+                "<br><b>laplacian</b>: más simple pero encoge y redondea."
+                "<br><b>none</b>: sin suavizado.",
+            self.smooth_iter:
+                "Iteraciones de suavizado. 5–10 típico con Taubin; muchas "
+                "iteraciones con Laplacian «derriten» el detalle.",
+            self.taubin_lambda:
+                "Paso de suavizado (expansión) de Taubin. Típico 0.5.",
+            self.taubin_mu:
+                "Paso de contracción negativo que compensa el encogimiento "
+                "del suavizado. Típico -0.53 (magnitud levemente mayor a λ).",
+            self.laplacian_lambda:
+                "Peso del suavizado Laplacian: mayor = más agresivo (y más "
+                "encogimiento del objeto).",
+        }
+        for w, tip in tips.items():
+            w.setToolTip(_tt(tip))
+
+        self.tabs.addTab(tab, "B · Rec")
 
     def _build_sol_tab(self):
         tab = QWidget()
@@ -569,7 +701,58 @@ class ParamPanel(QScrollArea):
         lay.addWidget(g_rep)
         lay.addStretch()
 
-        self.tabs.addTab(tab, "D · Sol")
+        # ── Tooltips explicativos ───────────────────────────────────────
+        tips = {
+            self.sol_voxel_auto:
+                "Calcula el tamaño de voxel según la escala del objeto "
+                "(1.5% de su tamaño medio). Es la referencia para el merge "
+                "de vértices y la voxelización.",
+            self.sol_voxel_size:
+                "Tamaño de voxel manual, en las unidades de la nube. Solo "
+                "se usa si el cálculo automático está desactivado.",
+            self.sol_strategy_repair:
+                "Repara la malla existente: limpieza topológica + cierre "
+                "real de agujeros. Máxima fidelidad porque conserva la "
+                "geometría original. Casi siempre es la estrategia ganadora.",
+            self.sol_strategy_poisson:
+                "Fallback si la reparación no logra cerrar: muestrea la "
+                "malla y reconstruye una envolvente Poisson, cerrada por "
+                "construcción. Preserva las concavidades (a diferencia del "
+                "Convex Hull).",
+            self.sol_poisson_depth:
+                "Resolución de la envolvente Poisson. 8 da la misma "
+                "fidelidad que 9 con la mitad de triángulos; subir solo "
+                "para objetos con detalle muy fino.",
+            self.sol_strategy_voxel:
+                "Voxeliza la malla y re-triangula con Ball Pivoting. "
+                "Respaldo intermedio; rara vez logra el cierre completo.",
+            self.sol_strategy_hull:
+                "Envolvente convexa: siempre produce un sólido cerrado pero "
+                "destruye toda concavidad del objeto. Último recurso — "
+                "normalmente la rechaza el control de calidad.",
+            self.sol_quality_check:
+                "Mide cuánto se aleja cada candidata de la malla original "
+                "(distancia de Chamfer) y rechaza las que deforman "
+                "demasiado. Sin esto se acepta la primera cerrada, aunque "
+                "sea el Convex Hull.",
+            self.sol_fidelity_max:
+                "Error medio máximo aceptado, como % de la diagonal del "
+                "objeto. 2% equilibrado; 1% más estricto (objetos con "
+                "concavidades importantes); subir si el escaneo está muy "
+                "incompleto y hay que «inventar» superficie para cerrar.",
+            self.sol_merge_eps:
+                "Distancia de fusión de vértices cercanos, como factor del "
+                "voxel. Se limita automáticamente al 50% de la arista "
+                "mediana para no destruir el detalle de la malla.",
+            self.sol_fill_holes:
+                "Cierre real de agujeros: abanico al centroide de cada "
+                "borde + triangulación + eliminación de defectos "
+                "no-manifold, en rondas iterativas.",
+        }
+        for w, tip in tips.items():
+            w.setToolTip(_tt(tip))
+
+        self.tabs.addTab(tab, "C · Sol")
 
     def get_pre_params(self) -> dict:
         return {
@@ -731,7 +914,9 @@ class MainWindow(QMainWindow):
     # ── Constantes base (se ajustan en __init__ según disponibilidad e57) ──
     _IMPORT_FORMATS_FULL    = "Point Cloud (*.ply *.xyz *.pcd *.e57)"
     _IMPORT_FORMATS_NO_E57  = "Point Cloud (*.ply *.xyz *.pcd)"
-    EXPORT_FORMATS          = "PLY (*.ply);;STL (*.stl);;OBJ (*.obj)"
+    EXPORT_FORMATS          = ("PLY (*.ply);;STL (*.stl);;OBJ (*.obj);;"
+                               "OFF (*.off);;GLTF (*.gltf)")
+    CLOUD_EXPORT_FORMATS    = "PLY (*.ply);;PCD (*.pcd);;XYZ (*.xyz)"
 
     def __init__(self):
         super().__init__()
@@ -827,8 +1012,27 @@ class MainWindow(QMainWindow):
         self.btn_load = QPushButton("📂 Cargar nube")
         gio.addWidget(self.btn_load)
 
-        self.btn_export = QPushButton("💾 Exportar malla")
+        # Acciones de exportación por producto: se comparten entre el menú
+        # desplegable de este botón y el menú Archivo.
+        self.act_export_cloud = QAction("Exportar nube de puntos…", self)
+        self.act_export_cloud.triggered.connect(self._export_cloud)
+        self.act_export_cloud.setEnabled(False)
+
+        self.act_export_mesh = QAction("Exportar malla reconstruida…", self)
+        self.act_export_mesh.triggered.connect(self._export_recon_mesh)
+        self.act_export_mesh.setEnabled(False)
+
+        self.act_export_solid = QAction("Exportar sólido…", self)
+        self.act_export_solid.triggered.connect(self._export_solid_mesh)
+        self.act_export_solid.setEnabled(False)
+
+        self.btn_export = QPushButton("💾 Exportar…")
         self.btn_export.setEnabled(False)
+        menu_export = QMenu(self.btn_export)
+        menu_export.addAction(self.act_export_cloud)
+        menu_export.addAction(self.act_export_mesh)
+        menu_export.addAction(self.act_export_solid)
+        self.btn_export.setMenu(menu_export)
         gio.addWidget(self.btn_export)
 
         lay.addWidget(g_io)
@@ -840,11 +1044,11 @@ class MainWindow(QMainWindow):
         self.btn_preprocess.setEnabled(False)
         gpipe.addWidget(self.btn_preprocess)
 
-        self.btn_reconstruct = QPushButton("C · Reconstruir")
+        self.btn_reconstruct = QPushButton("B · Reconstruir")
         self.btn_reconstruct.setEnabled(False)
         gpipe.addWidget(self.btn_reconstruct)
 
-        self.btn_solidify    = QPushButton("D · Solidificar")
+        self.btn_solidify    = QPushButton("C · Solidificar")
         self.btn_solidify.setEnabled(False)
         gpipe.addWidget(self.btn_solidify)
 
@@ -916,10 +1120,11 @@ class MainWindow(QMainWindow):
         a_load.triggered.connect(self._load_point_cloud)
         m_file.addAction(a_load)
 
-        a_export = QAction("Exportar malla…", self)
-        a_export.setShortcut("Ctrl+S")
-        a_export.triggered.connect(self._export_mesh)
-        m_file.addAction(a_export)
+        # Exportación por producto (mismas acciones que el botón Exportar)
+        self.act_export_solid.setShortcut("Ctrl+S")
+        m_file.addAction(self.act_export_cloud)
+        m_file.addAction(self.act_export_mesh)
+        m_file.addAction(self.act_export_solid)
 
         m_file.addSeparator()
 
@@ -941,11 +1146,11 @@ class MainWindow(QMainWindow):
         a_pre.triggered.connect(self._run_preprocess)
         m_pipe.addAction(a_pre)
 
-        a_rec = QAction("C · Reconstruir", self)
+        a_rec = QAction("B · Reconstruir", self)
         a_rec.triggered.connect(self._run_reconstruct)
         m_pipe.addAction(a_rec)
 
-        a_sol = QAction("D · Solidificar", self)
+        a_sol = QAction("C · Solidificar", self)
         a_sol.triggered.connect(self._run_solidify)
         m_pipe.addAction(a_sol)
 
@@ -988,8 +1193,8 @@ class MainWindow(QMainWindow):
         tb.addAction("💾 Exportar", self._export_mesh)
         tb.addSeparator()
         tb.addAction("A · Pre",    self._run_preprocess)
-        tb.addAction("C · Rec",    self._run_reconstruct)
-        tb.addAction("D · Sol",    self._run_solidify)
+        tb.addAction("B · Rec",    self._run_reconstruct)
+        tb.addAction("C · Sol",    self._run_solidify)
         tb.addAction("▶ Todo",     self._run_all)
         tb.addSeparator()
         tb.addAction("↩ Undo",     self._undo)
@@ -1063,19 +1268,65 @@ class MainWindow(QMainWindow):
 
             self.btn_preprocess.setEnabled(True)
             self.btn_run_all.setEnabled(True)
+            self.btn_export.setEnabled(True)
+            self.act_export_cloud.setEnabled(True)
+            self.act_export_mesh.setEnabled(False)
+            self.act_export_solid.setEnabled(False)
 
         except Exception as e:
             self._show_error(f"Error al cargar archivo:\n{e}")
 
+    def _ask_save_path(self, titulo: str, formatos: str) -> str | None:
+        """Diálogo de guardado; asegura la extensión del filtro elegido."""
+        path, fmt = QFileDialog.getSaveFileName(self, titulo, "", formatos)
+        if not path:
+            return None
+        if not os.path.splitext(path)[1] and "*" in fmt:
+            ext = fmt[fmt.find("*") + 1 : fmt.find(")")].strip()
+            path += ext
+        return path
+
+    def _export_cloud(self):
+        pcd = self.clean_pcd or self.raw_pcd
+        if pcd is None:
+            self._show_error("No hay nube de puntos para exportar.")
+            return
+        origen = "preprocesada" if self.clean_pcd is not None else "original"
+        path = self._ask_save_path(f"Exportar nube ({origen})",
+                                   self.CLOUD_EXPORT_FORMATS)
+        if not path:
+            return
+        try:
+            if not o3d.io.write_point_cloud(path, pcd):
+                raise RuntimeError("Open3D no pudo escribir el archivo")
+            self._log(f"  ✓ Nube {origen} exportada: "
+                      f"{os.path.basename(path)}")
+            self._status(f"Exportada: {os.path.basename(path)}")
+        except Exception as e:
+            self._show_error(f"Error al exportar:\n{e}")
+
+    def _export_recon_mesh(self):
+        self._export_mesh_product(self.recon_mesh, "malla reconstruida")
+
+    def _export_solid_mesh(self):
+        self._export_mesh_product(self.solid_mesh, "sólido")
+
     def _export_mesh(self):
-        mesh = self.solid_mesh or self.recon_mesh
+        """Exporta el producto más avanzado disponible (toolbar)."""
+        if self.solid_mesh is not None:
+            self._export_solid_mesh()
+        elif self.recon_mesh is not None:
+            self._export_recon_mesh()
+        else:
+            self._export_cloud()
+
+    def _export_mesh_product(self, mesh, nombre: str):
         if mesh is None:
-            self._show_error("No hay malla disponible para exportar.")
+            self._show_error(f"No hay {nombre} para exportar.")
             return
 
-        path, fmt = QFileDialog.getSaveFileName(
-            self, "Exportar malla", "", self.EXPORT_FORMATS
-        )
+        path = self._ask_save_path(f"Exportar {nombre}",
+                                   self.EXPORT_FORMATS)
         if not path:
             return
 
@@ -1087,14 +1338,20 @@ class MainWindow(QMainWindow):
                 reply = QMessageBox.question(
                     self,
                     "Malla no watertight",
-                    "La malla no es watertight.\n¿Exportar de todas formas?",
+                    f"La {nombre} no es watertight.\n"
+                    "¿Exportar de todas formas?",
                     QMessageBox.Yes | QMessageBox.No,
                 )
                 if reply != QMessageBox.Yes:
                     return
 
-            o3d.io.write_triangle_mesh(path, mesh)
-            self._log(f"  ✓ Exportada: {os.path.basename(path)}")
+            # STL exige normales de triángulo calculadas
+            if path.lower().endswith(".stl"):
+                mesh.compute_triangle_normals()
+
+            if not o3d.io.write_triangle_mesh(path, mesh):
+                raise RuntimeError("Open3D no pudo escribir el archivo")
+            self._log(f"  ✓ Exportada ({nombre}): {os.path.basename(path)}")
             self._status(f"Exportada: {os.path.basename(path)}")
 
         except Exception as e:
@@ -1152,7 +1409,7 @@ class MainWindow(QMainWindow):
         if self._worker_busy():
             return
         self._save_undo_state()
-        self._log("━━━ PIPELINE COMPLETO A→C→D ━━━")
+        self._log("━━━ PIPELINE COMPLETO A→B→C ━━━")
         self._run_all_step_a()
 
     def _run_all_step_a(self):
@@ -1160,19 +1417,19 @@ class MainWindow(QMainWindow):
             block   = WorkerThread.BLOCK_PREPROCESS,
             data    = {"point_cloud": self.raw_pcd},
             params  = self.param_panel.get_pre_params(),
-            on_done = self._run_all_step_c,
+            on_done = self._run_all_step_b,
         )
 
-    def _run_all_step_c(self):
+    def _run_all_step_b(self):
         pcd = self.clean_pcd or self.raw_pcd
         self._start_worker(
             block   = WorkerThread.BLOCK_RECONSTRUCT,
             data    = {"point_cloud": pcd},
             params  = self.param_panel.get_rec_params(),
-            on_done = self._run_all_step_d,
+            on_done = self._run_all_step_c,
         )
 
-    def _run_all_step_d(self):
+    def _run_all_step_c(self):
         self._start_worker(
             block   = WorkerThread.BLOCK_SOLIDIFY,
             data    = {"mesh": self.recon_mesh},
@@ -1225,6 +1482,14 @@ class MainWindow(QMainWindow):
         params  : dict,
         on_done : callable = None,
     ):
+        # Esperar a que el hilo anterior termine del todo antes de soltar
+        # su referencia: destruir un QThread cuya limpieza interna no ha
+        # concluido aborta el proceso completo (crash intermitente al
+        # re-ejecutar un bloque).
+        if self._worker is not None:
+            self._worker.wait()
+            self._worker = None
+
         self._worker = WorkerThread(block, data, params)
         self._worker._on_done_callback = on_done
 
@@ -1247,18 +1512,34 @@ class MainWindow(QMainWindow):
         block = result["block"]
 
         if block == WorkerThread.BLOCK_PREPROCESS:
-            self.clean_pcd = result["point_cloud"]
+            # Sobrescribe la nube limpia e invalida los productos aguas
+            # abajo: la malla/sólido anteriores ya no corresponden.
+            self.clean_pcd  = result["point_cloud"]
+            self.recon_mesh = None
+            self.solid_mesh = None
+            self.btn_show_mesh.setEnabled(False)
+            self.btn_show_solid.setEnabled(False)
+            self.btn_solidify.setEnabled(False)
+            self.act_export_mesh.setEnabled(False)
+            self.act_export_solid.setEnabled(False)
+            self.lbl_mesh_info.setText("Malla: —")
+            self.lbl_watertight.setText("Watertight: —")
             self.viewport.show_point_cloud(self.clean_pcd)
             self.btn_show_pcd.setEnabled(True)
             self.btn_reconstruct.setEnabled(True)
             self._update_pcd_label(result["stats"])
 
         elif block == WorkerThread.BLOCK_RECONSTRUCT:
+            # Sobrescribe la malla e invalida el sólido anterior.
             self.recon_mesh = result["mesh"]
+            self.solid_mesh = None
+            self.btn_show_solid.setEnabled(False)
+            self.act_export_solid.setEnabled(False)
             self.viewport.show_mesh(self.recon_mesh)
             self.btn_show_mesh.setEnabled(True)
             self.btn_solidify.setEnabled(True)
             self.btn_export.setEnabled(True)
+            self.act_export_mesh.setEnabled(True)
             self._update_mesh_label(result["stats"])
 
         elif block == WorkerThread.BLOCK_SOLIDIFY:
@@ -1266,6 +1547,7 @@ class MainWindow(QMainWindow):
             self.viewport.show_mesh(self.solid_mesh)
             self.btn_show_solid.setEnabled(True)
             self.btn_export.setEnabled(True)
+            self.act_export_solid.setEnabled(True)
             self._update_solid_label(result["stats"])
 
     def _on_error(self, msg: str):
@@ -1276,9 +1558,12 @@ class MainWindow(QMainWindow):
         self.progress_bar.setVisible(False)
         self._set_pipeline_buttons(True)
 
+        # No soltar la referencia al worker aquí: el hilo puede seguir en
+        # su limpieza interna. Se libera en el próximo _start_worker
+        # (tras wait()), lo que evita que Qt lo destruya en ejecución.
         cb = getattr(self._worker, "_on_done_callback", None)
-        self._worker = None
         if cb is not None:
+            self._worker._on_done_callback = None
             cb()
 
     def _worker_busy(self) -> bool:
@@ -1286,6 +1571,13 @@ class MainWindow(QMainWindow):
             self._log("  ⚠️  Hay una operación en curso, espera...")
             return True
         return False
+
+    def closeEvent(self, event):
+        # Esperar al worker antes de cerrar: destruir la ventana con un
+        # QThread vivo aborta el proceso.
+        if self._worker is not None:
+            self._worker.wait()
+        super().closeEvent(event)
 
     def _set_pipeline_buttons(self, enabled: bool):
         if self.raw_pcd is not None:
@@ -1351,7 +1643,13 @@ class MainWindow(QMainWindow):
             f"{stats['final_triangles']:,}t\n"
             f"[{stats['method']}]"
         )
-        self.lbl_watertight.setText("Watertight: calculando…")
+        wt = stats.get("is_closed")
+        if wt is None:
+            self.lbl_watertight.setText("Watertight: —")
+        else:
+            self.lbl_watertight.setText(
+                f"Watertight: {'✓ Sí' if wt else '✗ No'}"
+            )
 
     def _update_solid_label(self, stats: dict):
         wt = "✓ Sí" if stats["is_watertight"] else "✗ No"

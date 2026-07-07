@@ -1,6 +1,6 @@
 # core/solidifier.py
 # Extraído de PointCloudProcessor.run_solidify() / solidify_mesh()
-# Actualizado: firma run(params) compatible con main_gui.py WorkerThread (Bloque D)
+# Actualizado: firma run(params) compatible con main_gui.py WorkerThread (Bloque C)
 #
 # Rediseño de la cascada de solidificación:
 #   E1 repair  → reparación topológica + cierre real de agujeros (peel & fill)

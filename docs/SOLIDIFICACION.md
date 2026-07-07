@@ -1,7 +1,7 @@
-# Guía de parámetros — Solidificación (Bloque D)
+# Guía de parámetros — Solidificación (Bloque C)
 
 Documentación para los tesistas. Explica **cómo funciona la cascada de
-solidificación** (`core/solidifier.py`, pestaña **D · Sol** de la GUI),
+solidificación** (`core/solidifier.py`, pestaña **C · Sol** de la GUI),
 **qué hace cada parámetro** y **cómo se valida la calidad** del sólido final.
 
 ---
@@ -118,7 +118,7 @@ las rondas:
 
 ---
 
-## Parámetros (pestaña D · Sol)
+## Parámetros (pestaña C · Sol)
 
 | Parámetro | Default | Notas |
 |---|---|---|

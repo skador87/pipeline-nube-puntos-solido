@@ -1,6 +1,6 @@
 # core/reconstructor.py
 # Extraído de PointCloudProcessor.reconstruct_mesh() y métodos de limpieza
-# Actualizado: firma run(params) compatible con main_gui.py WorkerThread (Bloque C)
+# Actualizado: firma run(params) compatible con main_gui.py WorkerThread (Bloque B)
 
 import numpy as np
 import open3d as o3d
