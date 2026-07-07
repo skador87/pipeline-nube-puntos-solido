@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.py[cod]
+
+# Datos pesados y respaldos — no versionables en git
+# (input.ply pesa 104 MB; el .zip es un respaldo manual del proyecto)
+input.ply
+*.zip
+testing/conejo/bunny.tar.gz
+
+# Sesiones locales de Claude Code
+.claude/

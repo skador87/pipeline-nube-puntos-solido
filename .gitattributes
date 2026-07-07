@@ -1,0 +1,7 @@
+# Formatos de nube de puntos / malla: tratar como binarios para que git
+# nunca convierta finales de línea (corrompería los datos al checkout).
+*.ply -text
+*.pcd -text
+*.xyz -text
+*.e57 -text
+*.conf -text

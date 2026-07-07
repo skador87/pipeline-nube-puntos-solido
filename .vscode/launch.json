@@ -1,0 +1,16 @@
+{
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Run main_gui.py",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "${workspaceFolder}/main_gui.py",
+            "console": "integratedTerminal",
+            "env": {
+                "VISPY_APP": "pyqt5",
+                "PATH": "C:\\Users\\Skador\\miniforge3\\envs\\tesis_pointcloud\\Library\\bin;${env:PATH}"
+            }
+        }
+    ]
+}

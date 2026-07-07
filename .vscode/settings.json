@@ -1,0 +1,10 @@
+{
+    "python-envs.defaultEnvManager": "ms-python.python:conda",
+    "python-envs.defaultPackageManager": "ms-python.python:conda",
+    "python.defaultInterpreterPath": "C:\\Users\\skador\\miniforge3\\envs\\tesis_pointcloud\\python.exe",
+    "python.terminal.activateEnvironment": true,
+    "terminal.integrated.env.windows": {
+        "VISPY_APP": "pyqt5",
+        "PATH": "C:\\Users\\Skador\\miniforge3\\envs\\tesis_pointcloud\\Library\\bin;${env:PATH}"
+    }
+}
