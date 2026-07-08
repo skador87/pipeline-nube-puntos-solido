@@ -4,7 +4,9 @@
 # Formatos soportados:
 #   .ply  → o3d.io.read_point_cloud()  (nativo)
 #   .pcd  → o3d.io.read_point_cloud()  (nativo)
-#   .xyz  → parser manual con detección de columnas
+#   .xyz  → parser rápido numpy + fallback tolerante con detección de columnas
+#   .txt  → ídem .xyz (p. ej. S3DIS / Stanford3dDataset: "X Y Z R G B"
+#           con RGB en 0–255)
 #   .e57  → pye57 con fallback informativo
 #
 # Uso:
@@ -74,7 +76,7 @@ class PointCloudLoader:
         if ext in cls._O3D_NATIVE:
             pcd = cls._load_native(path, log)
 
-        elif ext == ".xyz":
+        elif ext in (".xyz", ".txt"):
             pcd = cls._load_xyz(path, meta, log)
 
         elif ext == ".e57":
@@ -121,6 +123,15 @@ class PointCloudLoader:
     #  .XYZ
     # ──────────────────────────────────────────────────────────────
 
+    # Nombres de columna por convención según su número
+    _COL_MAP = {
+        3: ["x", "y", "z"],
+        4: ["x", "y", "z", "intensity"],
+        6: ["x", "y", "z", "r", "g", "b"],
+        7: ["x", "y", "z", "intensity", "r", "g", "b"],
+        9: ["x", "y", "z", "r", "g", "b", "nx", "ny", "nz"],
+    }
+
     @classmethod
     def _load_xyz(
         cls,
@@ -129,7 +140,8 @@ class PointCloudLoader:
         log  : callable,
     ) -> o3d.geometry.PointCloud:
         """
-        Carga .xyz con detección automática de columnas.
+        Carga .xyz / .txt con detección automática de columnas.
+        Compatible con S3DIS (Stanford3dDataset): "X Y Z R G B", RGB 0–255.
 
         Formatos detectados (por número de columnas):
           3 cols → X Y Z
@@ -138,13 +150,20 @@ class PointCloudLoader:
           7 cols → X Y Z Intensity R G B   (orden alternativo)
           9 cols → X Y Z R G B Nx Ny Nz
         """
-        log(f"  ℹ️  Parseando .xyz con detección de columnas...")
+        log(f"  ℹ️  Parseando texto con detección de columnas...")
 
-        # ── Detectar separador y saltarse líneas de cabecera ──────────
-        data, col_names = cls._parse_xyz_file(path, meta, log)
+        # ── Vía rápida: parser C de numpy (archivos grandes tipo S3DIS) ─
+        data, col_names = cls._parse_text_fast(path, meta, log)
+
+        # ── Fallback tolerante: cabeceras, separadores raros o líneas
+        #    malformadas (p. ej. los .txt corruptos conocidos de S3DIS) ──
+        if data is None:
+            log("  ℹ️  Vía rápida falló — usando parser tolerante "
+                "(se omiten líneas malformadas)...")
+            data, col_names = cls._parse_xyz_file(path, meta, log)
 
         if data is None or len(data) == 0:
-            raise ValueError("Archivo .xyz vacío o ilegible")
+            raise ValueError("Archivo de texto vacío o ilegible")
 
         meta["xyz_columns"] = col_names
         log(f"  ℹ️  Columnas detectadas: {col_names}")
@@ -172,6 +191,44 @@ class PointCloudLoader:
             )
 
         return pcd
+
+    @classmethod
+    def _parse_text_fast(
+        cls,
+        path : str,
+        meta : dict,
+        log  : callable,
+    ) -> tuple[np.ndarray | None, list[str]]:
+        """
+        Intento de carga con np.loadtxt (parser en C, órdenes de magnitud
+        más rápido que el parser línea a línea). Devuelve (None, []) si el
+        archivo tiene cabecera no comentada, separadores inusuales o
+        líneas malformadas — en ese caso se usa el parser tolerante.
+        """
+        data = None
+        for delim in (None, ",", ";"):        # None = espacios/tabs
+            try:
+                data = np.loadtxt(path, dtype=np.float64,
+                                  delimiter=delim, ndmin=2)
+                break
+            except Exception:
+                data = None
+        if data is None or data.size == 0 or data.shape[1] < 3:
+            return None, []
+
+        # Filtrar filas no finitas
+        finite = np.isfinite(data).all(axis=1)
+        if not finite.all():
+            n_bad = int((~finite).sum())
+            meta["warnings"].append(
+                f"{n_bad:,} filas con valores no finitos omitidas")
+            data = data[finite]
+
+        n_cols = data.shape[1]
+        col_names = cls._COL_MAP.get(
+            n_cols, [f"col{i}" for i in range(n_cols)])
+        log(f"  ℹ️  Carga rápida: {len(data):,} filas × {n_cols} columnas")
+        return data, col_names
 
     @staticmethod
     def _parse_xyz_file(
@@ -224,6 +281,7 @@ class PointCloudLoader:
             sep = " "   # fallback
 
         # ── Leer datos ────────────────────────────────────────────────
+        n_malformed = 0
         for line in lines[skip_lines:]:
             line = line.strip()
             if not line or line.startswith("#") or line.startswith("//"):
@@ -233,7 +291,7 @@ class PointCloudLoader:
             try:
                 rows.append([float(p) for p in parts])
             except ValueError:
-                continue    # saltar líneas malformadas
+                n_malformed += 1    # saltar líneas malformadas
 
         if not rows:
             return None, []
@@ -241,19 +299,19 @@ class PointCloudLoader:
         # Homogenizar longitud de filas (usar la moda)
         lengths = [len(r) for r in rows]
         n_cols  = max(set(lengths), key=lengths.count)
+        n_before = len(rows)
         rows    = [r for r in rows if len(r) == n_cols]
+        n_malformed += n_before - len(rows)
+
+        if n_malformed:
+            meta["warnings"].append(
+                f"{n_malformed:,} líneas malformadas omitidas")
 
         data = np.array(rows, dtype=np.float64)
 
         # ── Asignar nombres de columna por convención ─────────────────
-        col_map = {
-            3: ["x", "y", "z"],
-            4: ["x", "y", "z", "intensity"],
-            6: ["x", "y", "z", "r", "g", "b"],
-            7: ["x", "y", "z", "intensity", "r", "g", "b"],
-            9: ["x", "y", "z", "r", "g", "b", "nx", "ny", "nz"],
-        }
-        col_names = col_map.get(n_cols, [f"col{i}" for i in range(n_cols)])
+        col_names = PointCloudLoader._COL_MAP.get(
+            n_cols, [f"col{i}" for i in range(n_cols)])
 
         return data, col_names
 

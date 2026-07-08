@@ -22,7 +22,7 @@ from PyQt5.QtWidgets import (
     QGroupBox, QScrollArea, QTextEdit,
     QFileDialog, QProgressBar, QTabWidget,
     QSizePolicy, QFrame, QAction, QToolBar,
-    QStatusBar, QMessageBox, QMenu,
+    QStatusBar, QMessageBox, QMenu, QStackedWidget,
 )
 from PyQt5.QtCore  import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui   import QFont, QColor, QPalette, QIcon, QSurfaceFormat
@@ -31,6 +31,7 @@ import vispy
 vispy.use(app="pyqt5")           # fija el backend antes de crear cualquier canvas
 from vispy         import scene
 from vispy.scene   import visuals
+from vispy.visuals.transforms import MatrixTransform
 
 # ── Core modules ──────────────────────────────────────────────────────────────
 from core.preprocessor import PointCloudPreprocessor
@@ -254,12 +255,300 @@ class ParamPanel(QScrollArea):
         root.setSpacing(6)
         root.setContentsMargins(4, 4, 4, 4)
 
-        self.tabs = QTabWidget()
-        root.addWidget(self.tabs)
+        # ── Selector de modo de uso ─────────────────────────────────────
+        g_mode = QGroupBox("Modo de uso")
+        gml    = QHBoxLayout(g_mode)
+        gml.addWidget(QLabel("Modo:"))
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["Básico", "Avanzado"])
+        self.mode_combo.setToolTip(_tt(
+            "<b>Básico</b>: controles por categorías (sin números); los "
+            "parámetros críticos quedan siempre en valores seguros."
+            "<br><b>Avanzado</b>: acceso numérico a todos los parámetros, "
+            "para especialistas. Muestra los valores que el modo básico "
+            "está aplicando."
+        ))
+        gml.addWidget(self.mode_combo, stretch=1)
+        root.addWidget(g_mode)
 
+        # ── Páginas: básico / avanzado ──────────────────────────────────
+        self.tabs = QTabWidget()
         self._build_pre_tab()
         self._build_rec_tab()
         self._build_sol_tab()
+
+        self.stack = QStackedWidget()
+        self.stack.addWidget(self._build_basic_page())   # índice 0
+        self.stack.addWidget(self.tabs)                  # índice 1
+        root.addWidget(self.stack)
+
+        self.mode_combo.currentIndexChanged.connect(self._on_mode_changed)
+
+        # Estado inicial coherente: aplicar los presets del modo básico
+        # (equivalen a los valores por defecto validados).
+        self._apply_basic_presets()
+
+    # ══════════════════════════════════════════════════════════════
+    #  MODO BÁSICO
+    # ══════════════════════════════════════════════════════════════
+
+    _SMOOTH_LEVELS = ["Ninguno", "Leve", "Medio", "Alto"]
+
+    def _build_basic_page(self) -> QWidget:
+        """
+        Página del modo básico: categorías en lugar de números, agrupadas
+        por proceso (A, B y C). Cada control se traduce a los parámetros
+        numéricos del modo avanzado (que sigue siendo la única fuente de
+        verdad para get_*_params), y los parámetros críticos para la
+        robustez del sólido quedan siempre fijos en configuración segura.
+        """
+        page = QWidget()
+        lay  = QVBoxLayout(page)
+        lay.setSpacing(6)
+
+        intro = QLabel(
+            "Configura cada proceso con categorías simples. Los valores "
+            "numéricos que se aplican pueden verse en el modo Avanzado."
+        )
+        intro.setWordWrap(True)
+        intro.setStyleSheet("color: #9ab0c0;")
+        lay.addWidget(intro)
+
+        # ── A · Preprocesamiento ────────────────────────────────────────
+        g_a = QGroupBox("A · Preprocesamiento")
+        ga  = QGridLayout(g_a)
+
+        ga.addWidget(QLabel("Limpieza de ruido:"), 0, 0)
+        self.basic_clean = QComboBox()
+        self.basic_clean.addItems(["Suave", "Media", "Agresiva"])
+        self.basic_clean.setCurrentIndex(1)
+        self.basic_clean.setToolTip(_tt(
+            "Cuánto ruido se elimina de la nube (filtros ROR y SOR)."
+            "<br><b>Suave</b>: conserva casi todo (escaneos limpios o con "
+            "detalle fino que no se quiere perder)."
+            "<br><b>Media</b>: equilibrio recomendado."
+            "<br><b>Agresiva</b>: escaneos con mucho ruido o puntos "
+            "«voladores»; puede comerse bordes y zonas poco densas."
+        ))
+        ga.addWidget(self.basic_clean, 0, 1)
+
+        ga.addWidget(QLabel("Densidad de trabajo:"), 1, 0)
+        self.basic_density = QComboBox()
+        self.basic_density.addItems(
+            ["Baja (rápida)", "Media", "Alta (detalle)"])
+        self.basic_density.setCurrentIndex(1)
+        self.basic_density.setToolTip(_tt(
+            "Cuántos puntos se conservan para trabajar (voxelización)."
+            "<br><b>Baja</b>: procesos rápidos, ideal para probar "
+            "parámetros."
+            "<br><b>Media</b>: equilibrio recomendado."
+            "<br><b>Alta</b>: conserva el máximo de puntos; todo el "
+            "pipeline se vuelve más lento."
+        ))
+        ga.addWidget(self.basic_density, 1, 1)
+
+        ga.addWidget(QLabel("Reducción de ruido fino:"), 2, 0)
+        self.basic_mls = QComboBox()
+        self.basic_mls.addItems(["Ninguna", "Leve", "Media"])
+        self.basic_mls.setCurrentIndex(1)
+        self.basic_mls.setToolTip(_tt(
+            "Suavizado MLS de la nube: reduce la «rugosidad» de "
+            "medición proyectando cada punto sobre la superficie local."
+            "<br><b>Ninguna</b>: conserva los puntos tal cual."
+            "<br><b>Leve</b>: 1 pasada (recomendado)."
+            "<br><b>Media</b>: 2 pasadas, para escaneos muy rugosos."
+        ))
+        ga.addWidget(self.basic_mls, 2, 1)
+
+        lay.addWidget(g_a)
+
+        # ── B · Reconstrucción ──────────────────────────────────────────
+        g_b = QGroupBox("B · Reconstrucción")
+        gb  = QGridLayout(g_b)
+
+        gb.addWidget(QLabel("Nivel de detalle:"), 0, 0)
+        self.basic_detail = QComboBox()
+        self.basic_detail.addItems(["Bajo", "Medio", "Alto"])
+        self.basic_detail.setCurrentIndex(1)
+        self.basic_detail.setToolTip(_tt(
+            "Resolución de la malla reconstruida (profundidad Poisson)."
+            "<br><b>Bajo</b>: rápido, para pruebas o piezas simples."
+            "<br><b>Medio</b>: equilibrio recomendado."
+            "<br><b>Alto</b>: máximo detalle; más lento y produce mallas "
+            "mucho más pesadas."
+        ))
+        gb.addWidget(self.basic_detail, 0, 1)
+
+        gb.addWidget(QLabel("Suavizado de superficie:"), 1, 0)
+        sm_box = QVBoxLayout()
+        self.basic_smooth = QSlider(Qt.Horizontal)
+        self.basic_smooth.setRange(0, 3)
+        self.basic_smooth.setValue(2)
+        self.basic_smooth.setTickPosition(QSlider.TicksBelow)
+        self.basic_smooth.setTickInterval(1)
+        self.basic_smooth.setToolTip(_tt(
+            "Cuánto se alisa la superficie reconstruida (método Taubin, "
+            "que no encoge el objeto). Más suavizado = superficie más "
+            "limpia pero menos detalle fino."
+        ))
+        sm_box.addWidget(self.basic_smooth)
+        self.basic_smooth_label = QLabel(self._SMOOTH_LEVELS[2])
+        self.basic_smooth_label.setAlignment(Qt.AlignCenter)
+        self.basic_smooth_label.setStyleSheet("color: #9ab0c0;")
+        sm_box.addWidget(self.basic_smooth_label)
+        gb.addLayout(sm_box, 1, 1)
+
+        self.basic_artifacts = QCheckBox("Eliminar artefactos")
+        self.basic_artifacts.setChecked(True)
+        self.basic_artifacts.setToolTip(_tt(
+            "Elimina las «telas fantasma» (superficie inventada al "
+            "puentear zonas sin datos) y las paredes internas espurias. "
+            "Recomendado dejarlo activado; desactivar solo si el filtro "
+            "se está comiendo geometría real."
+        ))
+        gb.addWidget(self.basic_artifacts, 2, 0, 1, 2)
+
+        lay.addWidget(g_b)
+
+        # ── C · Solidificación ──────────────────────────────────────────
+        g_c = QGroupBox("C · Solidificación")
+        gc  = QGridLayout(g_c)
+
+        gc.addWidget(QLabel("Fidelidad del sólido:"), 0, 0)
+        self.basic_fidelity = QComboBox()
+        self.basic_fidelity.addItems(
+            ["Estricta", "Equilibrada", "Flexible"])
+        self.basic_fidelity.setCurrentIndex(1)
+        self.basic_fidelity.setToolTip(_tt(
+            "Cuánta deformación se acepta al cerrar el sólido."
+            "<br><b>Estricta</b> (1%): objetos con concavidades "
+            "importantes que no se pueden perder."
+            "<br><b>Equilibrada</b> (2%): recomendada."
+            "<br><b>Flexible</b> (5%): escaneos muy incompletos, donde "
+            "hay que «inventar» superficie para lograr el cierre."
+        ))
+        gc.addWidget(self.basic_fidelity, 0, 1)
+
+        gc.addWidget(QLabel("Resolución del cierre:"), 1, 0)
+        self.basic_close_res = QComboBox()
+        self.basic_close_res.addItems(["Ligera", "Media", "Alta"])
+        self.basic_close_res.setCurrentIndex(1)
+        self.basic_close_res.setToolTip(_tt(
+            "Resolución de la envolvente Poisson usada como respaldo "
+            "cuando la reparación directa no logra cerrar la malla."
+            "<br><b>Ligera</b>: sólido liviano, cierre más grueso."
+            "<br><b>Media</b>: recomendada."
+            "<br><b>Alta</b>: cierre más fino; el sólido resultante pesa "
+            "bastante más."
+        ))
+        gc.addWidget(self.basic_close_res, 1, 1)
+
+        lay.addWidget(g_c)
+
+        nota = QLabel(
+            "ℹ️ En modo básico la reconstrucción usa siempre Poisson y la "
+            "solidificación mantiene la cascada completa de estrategias "
+            "con control de calidad: la configuración validada más robusta."
+        )
+        nota.setWordWrap(True)
+        nota.setStyleSheet("color: #7a8a7a; font-size: 11px;")
+        lay.addWidget(nota)
+        lay.addStretch()
+
+        # Cualquier cambio en las categorías se traduce de inmediato a los
+        # parámetros numéricos del modo avanzado.
+        for combo in (self.basic_clean, self.basic_density, self.basic_mls,
+                      self.basic_detail, self.basic_fidelity,
+                      self.basic_close_res):
+            combo.currentIndexChanged.connect(self._apply_basic_presets)
+        self.basic_smooth.valueChanged.connect(self._apply_basic_presets)
+        self.basic_artifacts.toggled.connect(self._apply_basic_presets)
+
+        return page
+
+    def _on_mode_changed(self, index: int):
+        self.stack.setCurrentIndex(index)
+        # Al volver al modo básico se re-aplican los presets: garantiza un
+        # estado predecible aunque se haya experimentado en avanzado.
+        if index == 0:
+            self._apply_basic_presets()
+
+    def _apply_basic_presets(self):
+        """
+        Traduce las categorías del modo básico (por proceso A/B/C) a los
+        parámetros numéricos del modo avanzado y fija los resguardos de
+        robustez del sólido.
+        """
+        # ══ A · Preprocesamiento ════════════════════════════════════════
+        # Limpieza de ruido: (ror_factor, ror_min, sor_k, sor_std)
+        ror_f, ror_min, sor_k, sor_std = [
+            (3.0, 3, 20, 3.0),      # Suave
+            (2.5, 4, 20, 2.0),      # Media  (= defaults validados)
+            (2.0, 6, 30, 1.5),      # Agresiva
+        ][self.basic_clean.currentIndex()]
+        self.ror_enabled.setChecked(True)
+        self.sor_enabled.setChecked(True)
+        self.pre_dedup_enabled.setChecked(True)
+        self.ror_factor.setValue(ror_f)
+        self.ror_min_neighbors.setValue(ror_min)
+        self.sor_k.setValue(sor_k)
+        self.sor_std.setValue(sor_std)
+
+        # Densidad de trabajo: voxel_factor (más grande = menos puntos)
+        self.pre_voxel_enabled.setChecked(True)
+        self.pre_voxel_factor.setValue(
+            [2.5, 1.5, 1.0][self.basic_density.currentIndex()])
+
+        # Reducción de ruido fino: suavizado MLS
+        mls_iters = [0, 1, 2][self.basic_mls.currentIndex()]
+        self.pre_denoise_enabled.setChecked(mls_iters > 0)
+        if mls_iters > 0:
+            self.pre_denoise_iter.setValue(mls_iters)
+        self.pre_preserve_edges.setChecked(True)
+
+        # ══ B · Reconstrucción ══════════════════════════════════════════
+        # Nivel de detalle: profundidad Poisson
+        self.rec_method.setCurrentText("poisson")
+        self.poisson_depth.setValue(
+            [8, 10, 11][self.basic_detail.currentIndex()])
+
+        # Suavizado de superficie: iteraciones Taubin (0 = desactivado)
+        nivel = self.basic_smooth.value()
+        if hasattr(self, "basic_smooth_label"):
+            self.basic_smooth_label.setText(self._SMOOTH_LEVELS[nivel])
+        iters = [0, 3, 5, 10][nivel]
+        if iters == 0:
+            self.smooth_method.setCurrentText("none")
+        else:
+            self.smooth_method.setCurrentText("taubin")
+            self.smooth_iter.setValue(iters)
+            self.taubin_lambda.setValue(0.5)
+            self.taubin_mu.setValue(-0.53)
+
+        # Filtros de artefactos (un solo interruptor en modo básico)
+        artefactos = self.basic_artifacts.isChecked()
+        self.remove_webbing.setChecked(artefactos)
+        self.remove_hollow.setChecked(artefactos)
+
+        # ══ C · Solidificación ══════════════════════════════════════════
+        # Fidelidad del sólido: tolerancia Chamfer (%)
+        self.sol_fidelity_max.setValue(
+            [1.0, 2.0, 5.0][self.basic_fidelity.currentIndex()])
+
+        # Resolución del cierre: profundidad de la envolvente Poisson
+        self.sol_poisson_depth.setValue(
+            [7, 8, 9][self.basic_close_res.currentIndex()])
+
+        # ── Resguardos de robustez (siempre fijos en modo básico) ──────
+        self.pre_remove_invalid.setChecked(True)
+        self.sol_voxel_auto.setChecked(True)
+        self.sol_merge_eps.setValue(0.5)
+        self.sol_strategy_repair.setChecked(True)
+        self.sol_strategy_poisson.setChecked(True)
+        self.sol_strategy_voxel.setChecked(True)
+        self.sol_strategy_hull.setChecked(True)
+        self.sol_quality_check.setChecked(True)
+        self.sol_fill_holes.setChecked(True)
 
     def _build_pre_tab(self):
         tab = QWidget()
@@ -820,7 +1109,36 @@ class ParamPanel(QScrollArea):
 #  VISPY VIEWPORT
 # ══════════════════════════════════════════════════════════════════════════════
 
+class _RobustSceneCanvas(scene.SceneCanvas):
+    """
+    SceneCanvas sin render de picking en GPU.
+
+    Al hacer clic, Vispy re-renderiza toda la escena a un framebuffer
+    oculto (picking) para saber qué visual está bajo el cursor; ese
+    render extra es la fuente de los access violations nativos al rotar
+    ("OSError: access violation" en glDrawArrays). La cámara solo
+    necesita saber si el clic cayó dentro del ViewBox, cosa que el
+    fallback por bounding-box en CPU (el mismo que Vispy usa cuando no
+    hay soporte de read_pixels) resuelve sin tocar la GPU.
+    """
+
+    def visual_at(self, pos):
+        try:
+            return self._visual_bounds_at(pos)
+        except Exception:
+            return None
+
+
 class Viewport3D(QWidget):
+
+    # Señales hacia MainWindow
+    transform_committed = pyqtSignal(object, str)   # (matriz 4×4, modo)
+    point_picked        = pyqtSignal(object)        # punto 3D medido
+
+    _DRAG_DEG_PER_PX   = 0.4     # sensibilidad de rotación con cursor
+    _DRAG_SCALE_PER_PX = 0.005   # sensibilidad de escala con cursor
+    _PICK_RADIUS_PX    = 20      # radio de captura para medición
+    _MAX_PICK_POINTS   = 150_000
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -829,7 +1147,7 @@ class Viewport3D(QWidget):
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
 
-        self.canvas = scene.SceneCanvas(
+        self.canvas = _RobustSceneCanvas(
             keys="interactive",
             bgcolor="#1a1a22",
             show=False,
@@ -841,68 +1159,321 @@ class Viewport3D(QWidget):
             fov=45, distance=5, elevation=30, azimuth=45
         )
 
+        # Visuales persistentes: se crean una sola vez y se actualizan con
+        # set_data(). Crear/desconectar visuales en cada ejecución deja
+        # buffers GL huérfanos en el contexto compartido, que terminan en
+        # crashes nativos al redibujar.
         self._pcd_visual  = None
         self._mesh_visual = None
+
+        # Estado de edición interactiva (mover/rotar/escalar con cursor)
+        self._edit_mode   = None      # None|'move'|'rotate'|'scale'|'measure'
+        self.edit_axis    = 0         # eje activo para rotación/paramétrico
+        self._dragging    = False
+        self._drag_last   = None
+        self._drag_T      = np.eye(4)
+        self._drag_center = None
+        self._press_pos   = None
+
+        # Puntos para picking de medición (submuestreo de lo visible)
+        self._pick_pts = None
+
+        # Modo de color de la nube: "rgb" (colores del archivo) o
+        # "solid" (un solo color uniforme)
+        self.color_mode   = "rgb"
+        self._SOLID_COLOR = (0.62, 0.68, 0.75)
+
+        # Visuales de medición (marcadores + línea)
+        self._measure_markers = None
+        self._measure_line    = None
+
+        self.canvas.events.mouse_press.connect(self._on_mouse_press)
+        self.canvas.events.mouse_move.connect(self._on_mouse_move)
+        self.canvas.events.mouse_release.connect(self._on_mouse_release)
 
         scene.visuals.XYZAxis(parent=self.view.scene)
 
-    def show_point_cloud(self, pcd: o3d.geometry.PointCloud):
-        self._clear_visuals()
+    def show_point_cloud(self, pcd: o3d.geometry.PointCloud, fit: bool = True):
+        try:
+            pts = np.asarray(pcd.points, dtype=np.float32)
+            finite = np.isfinite(pts).all(axis=1)
+            if not finite.all():
+                pts = pts[finite]
+            if len(pts) == 0:
+                return
 
-        pts = np.asarray(pcd.points)
-        if len(pts) == 0:
-            return
+            if pcd.has_colors() and self.color_mode == "rgb":
+                colors = np.asarray(pcd.colors, dtype=np.float32)
+                if not finite.all():
+                    colors = colors[finite]
+            else:
+                colors = np.full((len(pts), 3), self._SOLID_COLOR,
+                                 dtype=np.float32)
 
-        if pcd.has_colors():
-            colors = np.asarray(pcd.colors).astype(np.float32)
-        else:
-            colors = np.full((len(pts), 3), 0.6, dtype=np.float32)
+            if self._pcd_visual is None:
+                self._pcd_visual = visuals.Markers(parent=self.view.scene)
+                self._pcd_visual.interactive = False
 
-        self._pcd_visual = visuals.Markers()
-        self._pcd_visual.set_data(
-            pts.astype(np.float32),
-            face_color=colors,
-            size=2,
-            edge_width=0,
-        )
-        self.view.add(self._pcd_visual)
-        self._fit_camera(pts)
+            self._pcd_visual.set_data(
+                pts,
+                face_color=colors,
+                size=2,
+                edge_width=0,
+            )
+            self._pcd_visual.visible = True
+            if self._mesh_visual is not None:
+                self._mesh_visual.visible = False
 
-    def show_mesh(self, mesh: o3d.geometry.TriangleMesh):
-        self._clear_visuals()
+            self._set_pick_points(pts)
+            if fit:
+                self._fit_camera(pts)
+            self.canvas.update()
 
-        verts = np.asarray(mesh.vertices,  dtype=np.float32)
-        tris  = np.asarray(mesh.triangles, dtype=np.uint32)
+        except Exception as e:
+            print(f"[Viewport3D] Error mostrando nube: {e}")
 
-        if len(verts) == 0 or len(tris) == 0:
-            return
+    def show_mesh(self, mesh: o3d.geometry.TriangleMesh, fit: bool = True):
+        try:
+            verts = np.asarray(mesh.vertices,  dtype=np.float32)
+            tris  = np.asarray(mesh.triangles, dtype=np.uint32)
 
-        if mesh.has_vertex_colors():
-            colors = np.asarray(mesh.vertex_colors, dtype=np.float32)
-        else:
-            colors = np.full((len(verts), 3), 0.65, dtype=np.float32)
+            if len(verts) == 0 or len(tris) == 0:
+                return
 
-        self._mesh_visual = visuals.Mesh(
-            vertices      = verts,
-            faces         = tris,
-            vertex_colors = colors,
-            shading       = "smooth",
-        )
-        self.view.add(self._mesh_visual)
-        self._fit_camera(verts)
+            # Vértices no finitos o índices fuera de rango corrompen los
+            # buffers GL: se sanea antes de subir a la GPU.
+            if not np.isfinite(verts).all() or tris.max() >= len(verts):
+                m2 = o3d.geometry.TriangleMesh(mesh)
+                m2.remove_vertices_by_mask(
+                    ~np.isfinite(np.asarray(m2.vertices)).all(axis=1)
+                )
+                m2.remove_degenerate_triangles()
+                m2.remove_unreferenced_vertices()
+                verts = np.asarray(m2.vertices,  dtype=np.float32)
+                tris  = np.asarray(m2.triangles, dtype=np.uint32)
+                mesh  = m2
+                if len(verts) == 0 or len(tris) == 0:
+                    return
+
+            if mesh.has_vertex_colors():
+                colors = np.asarray(mesh.vertex_colors, dtype=np.float32)
+            else:
+                colors = np.full((len(verts), 3), 0.65, dtype=np.float32)
+
+            if self._mesh_visual is None:
+                self._mesh_visual = visuals.Mesh(
+                    vertices      = verts,
+                    faces         = tris,
+                    vertex_colors = colors,
+                    shading       = "smooth",
+                    parent        = self.view.scene,
+                )
+                self._mesh_visual.interactive = False
+            else:
+                self._mesh_visual.set_data(
+                    vertices      = verts,
+                    faces         = tris,
+                    vertex_colors = colors,
+                )
+
+            self._mesh_visual.visible = True
+            if self._pcd_visual is not None:
+                self._pcd_visual.visible = False
+
+            self._set_pick_points(verts)
+            if fit:
+                self._fit_camera(verts)
+            self.canvas.update()
+
+        except Exception as e:
+            print(f"[Viewport3D] Error mostrando malla: {e}")
 
     def _clear_visuals(self):
+        # Solo ocultar: los visuales se reutilizan (ver __init__).
         for v in (self._pcd_visual, self._mesh_visual):
             if v is not None:
-                v.parent = None
-        self._pcd_visual  = None
-        self._mesh_visual = None
+                v.visible = False
 
     def _fit_camera(self, points: np.ndarray):
         center   = points.mean(axis=0)
-        max_span = np.max(points.max(axis=0) - points.min(axis=0))
+        max_span = float(np.max(points.max(axis=0) - points.min(axis=0)))
+        if not np.isfinite(center).all() or not np.isfinite(max_span):
+            return
         self.view.camera.center   = center
-        self.view.camera.distance = max_span * 1.8
+        self.view.camera.distance = max(max_span, 1e-6) * 1.8
+
+    # ══════════════════════════════════════════════════════════════
+    #  EDICIÓN INTERACTIVA  (mover / rotar / escalar con el cursor)
+    # ══════════════════════════════════════════════════════════════
+
+    def set_edit_mode(self, mode: str | None):
+        """
+        Activa una herramienta de edición: 'move' | 'rotate' | 'scale' |
+        'measure' | None. En los modos de arrastre se desactiva la cámara
+        (el arrastre transforma la pieza, no la vista); en medición y sin
+        herramienta la cámara queda libre.
+        """
+        self._edit_mode = mode
+        self._dragging  = False
+        self.view.camera.interactive = mode not in ("move", "rotate", "scale")
+        if mode != "measure":
+            self.clear_measure()
+
+    def _set_pick_points(self, pts: np.ndarray):
+        """Guarda un submuestreo de lo visible para picking de medición."""
+        step = max(1, len(pts) // self._MAX_PICK_POINTS)
+        self._pick_pts = np.asarray(pts[::step], dtype=np.float64)
+
+    def _visible_visual(self):
+        if self._mesh_visual is not None and self._mesh_visual.visible:
+            return self._mesh_visual
+        if self._pcd_visual is not None and self._pcd_visual.visible:
+            return self._pcd_visual
+        return None
+
+    def _data_center(self):
+        if self._pick_pts is None or len(self._pick_pts) == 0:
+            return None
+        return (self._pick_pts.max(axis=0) + self._pick_pts.min(axis=0)) / 2.0
+
+    def _camera_axes_and_scale(self):
+        """Ejes derecha/arriba de la cámara en mundo y unidades por píxel."""
+        cam = self.view.camera
+        tr  = cam.transform
+        right = np.asarray(tr.map(np.array([1.0, 0.0, 0.0, 0.0]))[:3], float)
+        up    = np.asarray(tr.map(np.array([0.0, 1.0, 0.0, 0.0]))[:3], float)
+        right /= max(np.linalg.norm(right), 1e-12)
+        up    /= max(np.linalg.norm(up),    1e-12)
+        dist = cam.distance
+        if dist is None:
+            dist = getattr(cam, "_actual_distance", None) or 1.0
+        alto = max(self.canvas.size[1], 1)
+        wpp  = 2.0 * float(dist) * np.tan(np.radians(cam.fov or 45.0) / 2.0) / alto
+        return right, up, wpp
+
+    def _on_mouse_press(self, ev):
+        if ev.button != 1:
+            return
+        self._press_pos = np.array(ev.pos, dtype=float)
+        if self._edit_mode in ("move", "rotate", "scale"):
+            if self._pick_pts is None or len(self._pick_pts) == 0:
+                return
+            self._dragging    = True
+            self._drag_last   = np.array(ev.pos, dtype=float)
+            self._drag_T      = np.eye(4)
+            self._drag_center = self._data_center()
+
+    def _on_mouse_move(self, ev):
+        if not self._dragging:
+            return
+        pos = np.array(ev.pos, dtype=float)
+        d   = pos - self._drag_last
+        if not np.isfinite(d).all() or (d == 0).all():
+            return
+        self._drag_last = pos
+
+        T = np.eye(4)
+        if self._edit_mode == "move":
+            right, up, wpp = self._camera_axes_and_scale()
+            T[:3, 3] = (d[0] * right - d[1] * up) * wpp
+        elif self._edit_mode == "rotate":
+            c   = self._drag_center
+            eje = np.zeros(3)
+            eje[self.edit_axis] = 1.0
+            ang = np.radians(d[0] * self._DRAG_DEG_PER_PX)
+            R   = o3d.geometry.get_rotation_matrix_from_axis_angle(eje * ang)
+            T[:3, :3] = R
+            T[:3, 3]  = c - R @ c
+        elif self._edit_mode == "scale":
+            c = self._drag_center
+            s = float(np.exp(-d[1] * self._DRAG_SCALE_PER_PX))
+            T[:3, :3] *= s
+            T[:3, 3]   = c - s * c
+        else:
+            return
+
+        self._drag_T = T @ self._drag_T
+
+        # Vista previa barata: se transforma el visual (GPU), no los datos.
+        # Los datos se transforman una sola vez al soltar el botón.
+        for v in (self._pcd_visual, self._mesh_visual):
+            if v is not None and v.visible:
+                v.transform = MatrixTransform(self._drag_T.T)
+        self.canvas.update()
+
+    def _on_mouse_release(self, ev):
+        if ev.button != 1:
+            return
+
+        # Medición: un clic (sin arrastre) captura el punto más cercano
+        if self._edit_mode == "measure":
+            if (self._press_pos is not None and
+                    np.linalg.norm(np.array(ev.pos, float) -
+                                   self._press_pos) < 4.0):
+                p = self._pick_point_at(np.array(ev.pos, dtype=float))
+                if p is not None:
+                    self.point_picked.emit(p)
+            self._press_pos = None
+            return
+
+        if not self._dragging:
+            return
+        self._dragging = False
+        T = self._drag_T
+        self._drag_T = np.eye(4)
+        for v in (self._pcd_visual, self._mesh_visual):
+            if v is not None:
+                v.transform = MatrixTransform()
+        if not np.allclose(T, np.eye(4), atol=1e-12):
+            self.transform_committed.emit(T, self._edit_mode)
+
+    def _pick_point_at(self, pos: np.ndarray):
+        """Punto 3D visible más cercano al clic (proyección a pantalla)."""
+        if self._pick_pts is None or len(self._pick_pts) == 0:
+            return None
+        vis = self._visible_visual()
+        if vis is None:
+            return None
+        try:
+            tr = vis.get_transform("visual", "canvas")
+            m  = tr.map(self._pick_pts)
+            w  = m[:, 3:4].copy()
+            w[w == 0] = 1.0
+            scr = m[:, :2] / w
+            d2  = ((scr - pos) ** 2).sum(axis=1)
+            i   = int(np.nanargmin(d2))
+            if d2[i] > self._PICK_RADIUS_PX ** 2:
+                return None
+            return self._pick_pts[i].copy()
+        except Exception as e:
+            print(f"[Viewport3D] Error en picking: {e}")
+            return None
+
+    # ── Visuales de medición ────────────────────────────────────────────
+
+    def set_measure_points(self, pts):
+        pts = np.asarray(pts, dtype=np.float32).reshape(-1, 3)
+        if self._measure_markers is None:
+            self._measure_markers = visuals.Markers(parent=self.view.scene)
+            self._measure_markers.interactive = False
+            self._measure_line = visuals.Line(parent=self.view.scene,
+                                              color="yellow", width=2)
+            self._measure_line.interactive = False
+        self._measure_markers.set_data(
+            pts, face_color="yellow", size=10, edge_width=0)
+        self._measure_markers.visible = True
+        if len(pts) == 2:
+            self._measure_line.set_data(pos=pts)
+            self._measure_line.visible = True
+        else:
+            self._measure_line.visible = False
+        self.canvas.update()
+
+    def clear_measure(self):
+        for v in (self._measure_markers, self._measure_line):
+            if v is not None:
+                v.visible = False
+        self.canvas.update()
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -912,8 +1483,8 @@ class Viewport3D(QWidget):
 class MainWindow(QMainWindow):
 
     # ── Constantes base (se ajustan en __init__ según disponibilidad e57) ──
-    _IMPORT_FORMATS_FULL    = "Point Cloud (*.ply *.xyz *.pcd *.e57)"
-    _IMPORT_FORMATS_NO_E57  = "Point Cloud (*.ply *.xyz *.pcd)"
+    _IMPORT_FORMATS_FULL    = "Point Cloud (*.ply *.xyz *.txt *.pcd *.e57)"
+    _IMPORT_FORMATS_NO_E57  = "Point Cloud (*.ply *.xyz *.txt *.pcd)"
     EXPORT_FORMATS          = ("PLY (*.ply);;STL (*.stl);;OBJ (*.obj);;"
                                "OFF (*.off);;GLTF (*.gltf)")
     CLOUD_EXPORT_FORMATS    = "PLY (*.ply);;PCD (*.pcd);;XYZ (*.xyz)"
@@ -931,6 +1502,13 @@ class MainWindow(QMainWindow):
 
         self._undo_stack  : dict | None = None
         self._worker      : WorkerThread | None = None
+
+        # Historial de transformaciones (matrices 4×4) para poder
+        # deshacerlas; se limpia cuando el pipeline genera productos
+        # nuevos (que ya nacen en las coordenadas actuales).
+        self._transform_history : list = []
+        self._current_view      : str | None = None
+        self._measure_p1        : np.ndarray | None = None
 
         # ── CAMBIO 2: verificar e57 y fijar IMPORT_FORMATS ────────────
         e57_ok, e57_msg = check_e57_support()
@@ -977,6 +1555,10 @@ class MainWindow(QMainWindow):
         cv.setContentsMargins(0, 0, 0, 0)
 
         self.viewport = Viewport3D()
+
+        # Barra de edición adosada al borde superior del visor
+        self.edit_toolbar = self._build_edit_toolbar()
+        cv.addWidget(self.edit_toolbar)
         cv.addWidget(self.viewport, stretch=7)
 
         self.log_box = QTextEdit()
@@ -1076,6 +1658,14 @@ class MainWindow(QMainWindow):
         self.btn_show_solid.setEnabled(False)
         gview.addWidget(self.btn_show_solid)
 
+        self.chk_rgb = QCheckBox("Color RGB de la nube")
+        self.chk_rgb.setChecked(True)
+        self.chk_rgb.setToolTip(_tt(
+            "Muestra la nube con los colores RGB del archivo (si los "
+            "tiene) o con un color uniforme. El color uniforme ayuda a "
+            "evaluar la geometría sin la distracción de la textura."))
+        gview.addWidget(self.chk_rgb)
+
         lay.addWidget(g_view)
 
         g_edit = QGroupBox("Edición")
@@ -1105,6 +1695,317 @@ class MainWindow(QMainWindow):
         lay.addStretch()
 
         return w
+
+    # ══════════════════════════════════════════════════════════════
+    #  BARRA DE EDICIÓN  (adosada al borde superior del visor 3D)
+    # ══════════════════════════════════════════════════════════════
+
+    def _build_edit_toolbar(self) -> QToolBar:
+        """
+        Barra de herramientas de edición estilo AutoCAD, adosada al borde
+        superior del visor. Las herramientas Mover/Rotar/Escalar operan
+        con el cursor (arrastrando sobre el visor) y también en forma
+        paramétrica (botones −/+ con paso configurable). Medir entrega
+        distancias entre dos puntos clicados. Las transformaciones se
+        aplican a todos los productos cargados para mantenerlos alineados.
+        """
+        tb = QToolBar("Edición")
+        tb.setMovable(False)
+        tb.setStyleSheet("QToolBar { spacing: 4px; }")
+
+        # ── Herramientas interactivas (cursor) ─────────────────────────
+        self.act_tool_move    = QAction("⬄ Mover",   self)
+        self.act_tool_rotate  = QAction("⟳ Rotar",   self)
+        self.act_tool_scale   = QAction("⤢ Escalar", self)
+        self.act_tool_measure = QAction("📏 Medir",  self)
+
+        tips = {
+            self.act_tool_move:
+                "Mover con el cursor: activa la herramienta y arrastra "
+                "sobre el visor para desplazar la pieza en el plano de la "
+                "cámara. También −/+ para mover por paso en el eje activo.",
+            self.act_tool_rotate:
+                "Rotar con el cursor: arrastra horizontalmente para girar "
+                "la pieza en torno al eje seleccionado (por su centro). "
+                "También −/+ para rotar por paso.",
+            self.act_tool_scale:
+                "Escalar con el cursor: arrastra verticalmente para "
+                "agrandar/achicar la pieza respecto a su centro. "
+                "También −/+ para escalar por factor.",
+            self.act_tool_measure:
+                "Medir distancias: haz clic en dos puntos de la pieza; la "
+                "distancia y sus componentes ΔX/ΔY/ΔZ aparecen en el "
+                "terminal. La cámara sigue libre para orbitar entre clics.",
+        }
+        for act in (self.act_tool_move, self.act_tool_rotate,
+                    self.act_tool_scale, self.act_tool_measure):
+            act.setCheckable(True)
+            act.setToolTip(_tt(tips[act]))
+            act.triggered.connect(
+                lambda _, a=act: self._on_edit_tool(a))
+            tb.addAction(act)
+
+        tb.addSeparator()
+
+        # ── Eje activo (rotación y movimiento paramétrico) ─────────────
+        tb.addWidget(QLabel(" Eje: "))
+        self.edit_axis_combo = QComboBox()
+        self.edit_axis_combo.addItems(["X", "Y", "Z"])
+        self.edit_axis_combo.setToolTip(_tt(
+            "Eje sobre el que actúan la rotación (con cursor o "
+            "paramétrica) y el movimiento paramétrico −/+."))
+        self.edit_axis_combo.currentIndexChanged.connect(
+            lambda i: setattr(self.viewport, "edit_axis", i))
+        tb.addWidget(self.edit_axis_combo)
+
+        tb.addSeparator()
+
+        # ── Pasos paramétricos ──────────────────────────────────────────
+        tb.addWidget(QLabel(" Paso: "))
+        self.step_move = QDoubleSpinBox()
+        self.step_move.setRange(0.0001, 1e6)
+        self.step_move.setDecimals(4)
+        self.step_move.setValue(0.1)
+        self.step_move.setMaximumWidth(90)
+        self.step_move.setToolTip(_tt(
+            "Distancia del movimiento paramétrico (−/+), en unidades de "
+            "la nube. Se ajusta automáticamente al 5% del tamaño del "
+            "modelo al cargar."))
+        tb.addWidget(self.step_move)
+
+        tb.addWidget(QLabel(" ∠°: "))
+        self.step_rot = QDoubleSpinBox()
+        self.step_rot.setRange(0.1, 180.0)
+        self.step_rot.setDecimals(1)
+        self.step_rot.setValue(15.0)
+        self.step_rot.setMaximumWidth(70)
+        self.step_rot.setToolTip(_tt(
+            "Grados de la rotación paramétrica (−/+), en torno al centro "
+            "del modelo."))
+        tb.addWidget(self.step_rot)
+
+        tb.addWidget(QLabel(" ×: "))
+        self.step_scale = QDoubleSpinBox()
+        self.step_scale.setRange(1.01, 10.0)
+        self.step_scale.setDecimals(2)
+        self.step_scale.setSingleStep(0.05)
+        self.step_scale.setValue(1.10)
+        self.step_scale.setMaximumWidth(70)
+        self.step_scale.setToolTip(_tt(
+            "Factor de la escala paramétrica: «+» multiplica, «−» divide. "
+            "Útil también para convertir unidades (p. ej. factor 10)."))
+        tb.addWidget(self.step_scale)
+
+        b_menos = QPushButton("−")
+        b_mas   = QPushButton("+")
+        for b in (b_menos, b_mas):
+            b.setFixedWidth(28)
+        b_menos.setToolTip(_tt(
+            "Aplica la herramienta activa en forma paramétrica, en "
+            "sentido negativo (sin herramienta activa: mueve)."))
+        b_mas.setToolTip(_tt(
+            "Aplica la herramienta activa en forma paramétrica, en "
+            "sentido positivo (sin herramienta activa: mueve)."))
+        b_menos.clicked.connect(lambda: self._parametric_apply(-1))
+        b_mas.clicked.connect(lambda: self._parametric_apply(+1))
+        tb.addWidget(b_menos)
+        tb.addWidget(b_mas)
+
+        tb.addSeparator()
+
+        a_undo = QAction("↩ Deshacer", self)
+        a_undo.setToolTip(_tt("Deshace la última transformación aplicada "
+                              "(cursor o paramétrica)."))
+        a_undo.triggered.connect(self._undo_transform)
+        tb.addAction(a_undo)
+
+        return tb
+
+    def _on_edit_tool(self, act: QAction):
+        """Activación exclusiva de herramientas (clic en la activa la
+        desactiva y libera la cámara)."""
+        herramientas = {
+            self.act_tool_move   : "move",
+            self.act_tool_rotate : "rotate",
+            self.act_tool_scale  : "scale",
+            self.act_tool_measure: "measure",
+        }
+        if act.isChecked():
+            for otra in herramientas:
+                if otra is not act:
+                    otra.setChecked(False)
+            modo = herramientas[act]
+        else:
+            modo = None
+
+        self._measure_p1 = None
+        self.viewport.set_edit_mode(modo)
+
+        ayudas = {
+            "move"   : "🛠 Mover: arrastra sobre el visor para desplazar "
+                       "la pieza (la cámara queda fija)",
+            "rotate" : "🛠 Rotar: arrastra horizontalmente para girar en "
+                       "torno al eje "
+                       f"{self.edit_axis_combo.currentText()}",
+            "scale"  : "🛠 Escalar: arrastra verticalmente para cambiar "
+                       "el tamaño",
+            "measure": "📏 Medir: haz clic en dos puntos de la pieza",
+            None     : "Herramienta desactivada — cámara libre",
+        }
+        self._log(f"  {ayudas[modo]}")
+        self._status(ayudas[modo])
+
+    def _parametric_apply(self, sign: int):
+        """Botones −/+: aplican la herramienta activa por paso numérico."""
+        axis = self.edit_axis_combo.currentIndex()
+        if self.act_tool_rotate.isChecked():
+            self._transform_rotate(axis, sign)
+        elif self.act_tool_scale.isChecked():
+            self._transform_scale(sign)
+        else:
+            self._transform_move(axis, sign)
+
+    def _on_drag_transform(self, T, modo: str):
+        """Transformación confirmada por arrastre de cursor en el visor."""
+        T = np.asarray(T, dtype=float)
+        if modo == "move":
+            d = T[:3, 3]
+            desc = (f"Mover (cursor) Δ=({d[0]:+.4f}, {d[1]:+.4f}, "
+                    f"{d[2]:+.4f})")
+        elif modo == "rotate":
+            ang = np.degrees(np.arccos(
+                np.clip((np.trace(T[:3, :3]) - 1.0) / 2.0, -1.0, 1.0)))
+            desc = (f"Rotar (cursor) {ang:.1f}° en eje "
+                    f"{self.edit_axis_combo.currentText()}")
+        else:
+            s = float(np.cbrt(abs(np.linalg.det(T[:3, :3]))))
+            desc = f"Escalar (cursor) ×{s:.3f}"
+        self._apply_transform(T, desc, renormalize=(modo == "scale"))
+
+    def _on_measure_point(self, p):
+        """Puntos de medición clicados en el visor → distancia en el log."""
+        p = np.asarray(p, dtype=float)
+        if self._measure_p1 is None:
+            self._measure_p1 = p
+            self.viewport.set_measure_points([p])
+            self._log(f"  📍 Punto 1: ({p[0]:.4f}, {p[1]:.4f}, {p[2]:.4f})")
+            self._status("Medir: selecciona el segundo punto")
+        else:
+            p1, self._measure_p1 = self._measure_p1, None
+            d    = p - p1
+            dist = float(np.linalg.norm(d))
+            self.viewport.set_measure_points([p1, p])
+            self._log(f"  📍 Punto 2: ({p[0]:.4f}, {p[1]:.4f}, {p[2]:.4f})")
+            self._log(f"  📏 Distancia: {dist:.4f}  |  ΔX={d[0]:+.4f}  "
+                      f"ΔY={d[1]:+.4f}  ΔZ={d[2]:+.4f}")
+            self._status(f"Distancia: {dist:.4f}")
+
+    # ── Operaciones de transformación ──────────────────────────────────
+
+    def _all_products(self) -> list:
+        return [g for g in (self.raw_pcd, self.clean_pcd,
+                            self.recon_mesh, self.solid_mesh)
+                if g is not None]
+
+    def _reference_center(self) -> np.ndarray | None:
+        """Centro del bounding box del producto más avanzado disponible."""
+        for g in (self.solid_mesh, self.recon_mesh,
+                  self.clean_pcd, self.raw_pcd):
+            if g is not None:
+                return (np.asarray(g.get_max_bound()) +
+                        np.asarray(g.get_min_bound())) / 2.0
+        return None
+
+    def _apply_transform(self, T: np.ndarray, desc: str,
+                         renormalize: bool = False):
+        productos = self._all_products()
+        if not productos:
+            self._show_error("Carga una nube antes de usar las "
+                             "herramientas de edición.")
+            return
+        for g in productos:
+            g.transform(T)
+            if renormalize:
+                if isinstance(g, o3d.geometry.TriangleMesh):
+                    if g.has_vertex_normals():
+                        g.compute_vertex_normals()
+                elif g.has_normals():
+                    n = np.asarray(g.normals)
+                    mag = np.linalg.norm(n, axis=1, keepdims=True)
+                    mag[mag == 0] = 1.0
+                    g.normals = o3d.utility.Vector3dVector(n / mag)
+        self._transform_history.append(T)
+        self._log(f"  🛠 {desc}")
+        self._status(desc)
+        self._refresh_view()
+
+    def _transform_move(self, axis: int, sign: int):
+        paso = self.step_move.value() * sign
+        T = np.eye(4)
+        T[axis, 3] = paso
+        self._apply_transform(T, f"Mover {'XYZ'[axis]} {paso:+.4f}")
+
+    def _transform_rotate(self, axis: int, sign: int):
+        c = self._reference_center()
+        if c is None:
+            self._show_error("Carga una nube antes de usar las "
+                             "herramientas de edición.")
+            return
+        grados = self.step_rot.value() * sign
+        eje = np.zeros(3)
+        eje[axis] = 1.0
+        R = o3d.geometry.get_rotation_matrix_from_axis_angle(
+            eje * np.radians(grados))
+        T = np.eye(4)
+        T[:3, :3] = R
+        T[:3, 3]  = c - R @ c          # rotación en torno al centro
+        self._apply_transform(T, f"Rotar {'XYZ'[axis]} {grados:+.1f}°")
+
+    def _transform_scale(self, sign: int):
+        c = self._reference_center()
+        if c is None:
+            self._show_error("Carga una nube antes de usar las "
+                             "herramientas de edición.")
+            return
+        f = self.step_scale.value()
+        s = f if sign > 0 else 1.0 / f
+        T = np.eye(4)
+        T[:3, :3] *= s
+        T[:3, 3]   = c - s * c         # escala en torno al centro
+        self._apply_transform(T, f"Escalar ×{s:.3f}", renormalize=True)
+
+    def _undo_transform(self):
+        if not self._transform_history:
+            self._log("  ℹ️  No hay transformaciones que deshacer")
+            return
+        T = self._transform_history.pop()
+        Ti = np.linalg.inv(T)
+        for g in self._all_products():
+            g.transform(Ti)
+        self._log("  ↩ Transformación deshecha")
+        self._refresh_view()
+
+    def _on_rgb_toggled(self, checked: bool):
+        """Alterna entre colores RGB del archivo y color uniforme."""
+        self.viewport.color_mode = "rgb" if checked else "solid"
+        self._refresh_view()
+        self._status("Nube en color RGB" if checked
+                     else "Nube en color uniforme")
+
+    def _refresh_view(self):
+        """
+        Redibuja el producto que se estaba mostrando SIN re-encuadrar la
+        cámara (fit=False): así se ve que es la figura la que se mueve,
+        rota o cambia de tamaño, no el eje de coordenadas.
+        """
+        if self._current_view == "solid" and self.solid_mesh:
+            self.viewport.show_mesh(self.solid_mesh, fit=False)
+        elif self._current_view == "mesh" and self.recon_mesh:
+            self.viewport.show_mesh(self.recon_mesh, fit=False)
+        elif self._current_view == "clean" and self.clean_pcd:
+            self.viewport.show_point_cloud(self.clean_pcd, fit=False)
+        elif self.raw_pcd:
+            self.viewport.show_point_cloud(self.raw_pcd, fit=False)
 
     # ══════════════════════════════════════════════════════════════
     #  MENÚ  (sin cambios)
@@ -1180,6 +2081,14 @@ class MainWindow(QMainWindow):
         a_raw.triggered.connect(self._show_raw_pcd)
         m_view.addAction(a_raw)
 
+        m_view.addSeparator()
+
+        a_editbar = QAction("Barra de edición", self)
+        a_editbar.setCheckable(True)
+        a_editbar.setChecked(True)
+        a_editbar.toggled.connect(self.edit_toolbar.setVisible)
+        m_view.addAction(a_editbar)
+
     # ══════════════════════════════════════════════════════════════
     #  TOOLBAR  (sin cambios)
     # ══════════════════════════════════════════════════════════════
@@ -1215,8 +2124,13 @@ class MainWindow(QMainWindow):
         self.btn_show_pcd.clicked.connect(self._show_clean_pcd)
         self.btn_show_mesh.clicked.connect(self._show_recon_mesh)
         self.btn_show_solid.clicked.connect(self._show_solid_mesh)
+        self.chk_rgb.toggled.connect(self._on_rgb_toggled)
 
         self.btn_undo.clicked.connect(self._undo)
+
+        # Señales del visor (edición interactiva y medición)
+        self.viewport.transform_committed.connect(self._on_drag_transform)
+        self.viewport.point_picked.connect(self._on_measure_point)
 
     # ══════════════════════════════════════════════════════════════
     #  CARGA / EXPORTACIÓN
@@ -1255,6 +2169,16 @@ class MainWindow(QMainWindow):
             self.recon_mesh  = None
             self.solid_mesh  = None
             self._undo_stack = None
+            self._transform_history.clear()
+            self._current_view = "raw"
+
+            # Paso de movimiento proporcional al tamaño del modelo
+            diag = float(np.linalg.norm(
+                np.asarray(pcd.get_max_bound()) -
+                np.asarray(pcd.get_min_bound())
+            ))
+            if np.isfinite(diag) and diag > 0:
+                self.step_move.setValue(round(diag * 0.05, 4))
 
             self.viewport.show_point_cloud(pcd)
             self._update_info_labels()
@@ -1447,11 +2371,13 @@ class MainWindow(QMainWindow):
 
     def _show_raw_pcd(self):
         if self.raw_pcd:
+            self._current_view = "raw"
             self.viewport.show_point_cloud(self.raw_pcd)
             self._status("Vista: nube original")
 
     def _show_clean_pcd(self):
         if self.clean_pcd:
+            self._current_view = "clean"
             self.viewport.show_point_cloud(self.clean_pcd)
             self._status("Vista: nube preprocesada")
         else:
@@ -1459,6 +2385,7 @@ class MainWindow(QMainWindow):
 
     def _show_recon_mesh(self):
         if self.recon_mesh:
+            self._current_view = "mesh"
             self.viewport.show_mesh(self.recon_mesh)
             self._status("Vista: malla reconstruida")
         else:
@@ -1466,6 +2393,7 @@ class MainWindow(QMainWindow):
 
     def _show_solid_mesh(self):
         if self.solid_mesh:
+            self._current_view = "solid"
             self.viewport.show_mesh(self.solid_mesh)
             self._status("Vista: sólido final")
         else:
@@ -1511,6 +2439,11 @@ class MainWindow(QMainWindow):
     def _on_result(self, result: dict):
         block = result["block"]
 
+        # Los productos nuevos nacen en las coordenadas actuales: las
+        # transformaciones anteriores ya no se pueden deshacer sobre
+        # ellos sin desalinearlos.
+        self._transform_history.clear()
+
         if block == WorkerThread.BLOCK_PREPROCESS:
             # Sobrescribe la nube limpia e invalida los productos aguas
             # abajo: la malla/sólido anteriores ya no corresponden.
@@ -1524,6 +2457,7 @@ class MainWindow(QMainWindow):
             self.act_export_solid.setEnabled(False)
             self.lbl_mesh_info.setText("Malla: —")
             self.lbl_watertight.setText("Watertight: —")
+            self._current_view = "clean"
             self.viewport.show_point_cloud(self.clean_pcd)
             self.btn_show_pcd.setEnabled(True)
             self.btn_reconstruct.setEnabled(True)
@@ -1535,6 +2469,7 @@ class MainWindow(QMainWindow):
             self.solid_mesh = None
             self.btn_show_solid.setEnabled(False)
             self.act_export_solid.setEnabled(False)
+            self._current_view = "mesh"
             self.viewport.show_mesh(self.recon_mesh)
             self.btn_show_mesh.setEnabled(True)
             self.btn_solidify.setEnabled(True)
@@ -1544,6 +2479,7 @@ class MainWindow(QMainWindow):
 
         elif block == WorkerThread.BLOCK_SOLIDIFY:
             self.solid_mesh = result["mesh"]
+            self._current_view = "solid"
             self.viewport.show_mesh(self.solid_mesh)
             self.btn_show_solid.setEnabled(True)
             self.btn_export.setEnabled(True)

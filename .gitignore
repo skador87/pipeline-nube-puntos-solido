@@ -7,6 +7,10 @@ __pycache__/
 input.ply
 *.zip
 testing/conejo/bunny.tar.gz
+testing/Stanford3dDataset*/
+
+# Productos exportados durante pruebas (artefactos generados)
+output.*
 
 # Sesiones locales de Claude Code
 .claude/
