@@ -1,0 +1,18 @@
+# Dependencias de ejecución — Point Cloud Processor
+#
+# Versiones con las que el pipeline está validado (Python 3.11).
+# Instalación recomendada: ver README.md (entorno conda).
+#
+#   pip install -r requirements.txt
+
+numpy>=2.0
+scipy>=1.13
+open3d>=0.19          # < 0.19 no trae t.geometry.TriangleMesh.fill_holes
+PyQt5>=5.15
+vispy>=0.14
+
+# ── Formatos opcionales ───────────────────────────────────────────────
+# Sin estos paquetes la aplicación funciona igual, pero el formato
+# correspondiente no aparece en el diálogo de carga (se avisa en el log).
+laspy[lazrs]>=2.5     # .las / .laz  (LiDAR)
+# pye57>=0.4          # .e57         (descomentar si se necesita)

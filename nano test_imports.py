@@ -34,6 +34,14 @@ except Exception as e:
     traceback.print_exc()
     sys.exit()
 
+try:
+    import open3d, numpy, scipy, PyQt5, vispy
+    print('PASO 6: dependencias externas OK '
+          f'(open3d {open3d.__version__})')
+except Exception as e:
+    print(f'PASO 6 ERROR: {e}')
+    traceback.print_exc()
+    sys.exit()
+
 print('')
 print('=== TODOS LOS IMPORTS OK ===')
-print('=== EL PROBLEMA ESTA EN main() ===')
