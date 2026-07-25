@@ -8,6 +8,8 @@
 #   .txt  → ídem .xyz (p. ej. S3DIS / Stanford3dDataset: "X Y Z R G B"
 #           con RGB en 0–255)
 #   .e57  → pye57 con fallback informativo
+#   .las  → laspy (LiDAR); RGB 16-bit si existe, o intensidad como gris
+#   .laz  → ídem .las (requiere backend lazrs/laszip)
 #
 # Uso:
 #   from core.io_loader import PointCloudLoader
@@ -69,6 +71,7 @@ class PointCloudLoader:
             "has_normals" : False,
             "e57_scans"   : None,
             "xyz_columns" : None,
+            "las_offset"  : None,   # traslación aplicada a coords geo (LAS)
             "warnings"    : [],
         }
 
@@ -81,6 +84,9 @@ class PointCloudLoader:
 
         elif ext == ".e57":
             pcd = cls._load_e57(path, meta, log)
+
+        elif ext in (".las", ".laz"):
+            pcd = cls._load_las(path, meta, log)
 
         else:
             # Intentar con Open3D de todos modos
@@ -316,6 +322,100 @@ class PointCloudLoader:
         return data, col_names
 
     # ──────────────────────────────────────────────────────────────
+    #  .LAS / .LAZ
+    # ──────────────────────────────────────────────────────────────
+
+    @classmethod
+    def _load_las(
+        cls,
+        path : str,
+        meta : dict,
+        log  : callable,
+    ) -> o3d.geometry.PointCloud:
+        """
+        Carga .las/.laz (LiDAR) usando laspy.
+
+        - RGB: si el point format lo trae (formatos 2,3,5,7,8,10), se
+          normaliza desde 16-bit (o 8-bit si el archivo lo guarda así).
+        - Sin RGB: la intensidad se mapea a escala de grises con
+          normalización robusta por percentiles.
+        - Coordenadas georreferenciadas (UTM, ~10⁵–10⁷): se trasladan a
+          un origen local para evitar pérdida de precisión float32 en el
+          visor; el offset queda en meta["las_offset"] y en el log.
+
+        Requiere: pip install laspy   (para .laz: laspy[lazrs])
+        """
+        try:
+            import laspy
+        except ImportError:
+            raise ImportError(
+                "El formato .las/.laz requiere la librería 'laspy'.\n"
+                "Instálala con:  pip install laspy[lazrs]"
+            )
+
+        log(f"  ℹ️  Abriendo {meta['format']} con laspy...")
+        las = laspy.read(path)
+
+        fmt = las.point_format
+        log(f"  ℹ️  LAS {las.header.version} · point format {fmt.id} · "
+            f"{las.header.point_count:,} puntos")
+
+        pts = np.column_stack([las.x, las.y, las.z]).astype(np.float64)
+
+        # ── Filtrar no finitos ────────────────────────────────────────
+        finite = np.isfinite(pts).all(axis=1)
+        if not finite.all():
+            meta["warnings"].append(
+                f"{int((~finite).sum()):,} puntos no finitos omitidos")
+            pts = pts[finite]
+
+        # ── Recentrar coordenadas georreferenciadas ───────────────────
+        # Coordenadas UTM (~10⁵–10⁷ m) exceden la precisión de float32 y
+        # producen "jitter" al renderizar; el pipeline trabaja igual de
+        # bien en un origen local.
+        if len(pts) and np.abs(pts).max() > 1e5:
+            offset = np.floor(pts.min(axis=0))
+            pts    = pts - offset
+            meta["las_offset"] = offset.tolist()
+            log(f"  ℹ️  Coordenadas georreferenciadas: trasladadas a "
+                f"origen local (offset aplicado: "
+                f"{offset[0]:.0f}, {offset[1]:.0f}, {offset[2]:.0f})")
+            meta["warnings"].append(
+                "Nube trasladada a origen local; las exportaciones "
+                "quedan en coordenadas locales (offset en el log)")
+
+        pcd = o3d.geometry.PointCloud()
+        pcd.points = o3d.utility.Vector3dVector(pts)
+
+        # ── Color: RGB del archivo o intensidad como gris ─────────────
+        dims = set(fmt.dimension_names)
+        if {"red", "green", "blue"} <= dims:
+            rgb = np.column_stack([las.red, las.green, las.blue]) \
+                    .astype(np.float64)
+            if not finite.all():
+                rgb = rgb[finite]
+            escala = 65535.0 if rgb.max() > 255 else 255.0
+            pcd.colors = o3d.utility.Vector3dVector(
+                np.clip(rgb / escala, 0, 1))
+            log("  ℹ️  Color RGB del archivo aplicado")
+
+        elif "intensity" in dims:
+            inten = np.asarray(las.intensity, dtype=np.float64)
+            if not finite.all():
+                inten = inten[finite]
+            lo, hi = np.percentile(inten, [2, 98])
+            if hi > lo:
+                g = np.clip((inten - lo) / (hi - lo), 0, 1)
+            else:
+                g = np.full(len(inten), 0.6)
+            pcd.colors = o3d.utility.Vector3dVector(
+                np.column_stack([g, g, g]))
+            log("  ℹ️  Sin RGB — intensidad LiDAR mapeada a "
+                "escala de grises")
+
+        return pcd
+
+    # ──────────────────────────────────────────────────────────────
     #  .E57
     # ──────────────────────────────────────────────────────────────
 
@@ -493,3 +593,29 @@ def check_e57_support() -> tuple[bool, str]:
             "pye57 no instalado — .e57 no disponible\n"
             "Instalar: pip install pye57"
         )
+
+
+def check_las_support() -> tuple[bool, bool, str]:
+    """
+    Verifica si laspy está instalado y si hay backend LAZ.
+
+    Returns
+    -------
+    (las_available, laz_available, message)
+    """
+    try:
+        import laspy
+    except ImportError:
+        return False, False, (
+            "laspy no instalado — .las/.laz no disponibles\n"
+            "Instalar: pip install laspy[lazrs]"
+        )
+    try:
+        laz_ok = len(laspy.LazBackend.detect_available()) > 0
+    except Exception:
+        laz_ok = False
+    if laz_ok:
+        return True, True, "laspy disponible ✓ (.las y .laz)"
+    return True, False, (
+        "laspy disponible ✓ (.las) — para .laz instalar: pip install lazrs"
+    )

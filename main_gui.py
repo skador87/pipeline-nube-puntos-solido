@@ -39,7 +39,8 @@ from core.reconstructor import MeshReconstructor
 from core.solidifier    import MeshSolidifier
 
 # ── CAMBIO 1: nuevo import ─────────────────────────────────────────────────────
-from core.io_loader import PointCloudLoader, check_e57_support
+from core.io_loader import (PointCloudLoader, check_e57_support,
+                            check_las_support)
 
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -1482,9 +1483,9 @@ class Viewport3D(QWidget):
 
 class MainWindow(QMainWindow):
 
-    # ── Constantes base (se ajustan en __init__ según disponibilidad e57) ──
-    _IMPORT_FORMATS_FULL    = "Point Cloud (*.ply *.xyz *.txt *.pcd *.e57)"
-    _IMPORT_FORMATS_NO_E57  = "Point Cloud (*.ply *.xyz *.txt *.pcd)"
+    # ── Constantes base (los formatos de import se arman en __init__
+    #    según las librerías opcionales disponibles: pye57, laspy) ──────
+    _IMPORT_EXTS_BASE       = ["*.ply", "*.xyz", "*.txt", "*.pcd"]
     EXPORT_FORMATS          = ("PLY (*.ply);;STL (*.stl);;OBJ (*.obj);;"
                                "OFF (*.off);;GLTF (*.gltf)")
     CLOUD_EXPORT_FORMATS    = "PLY (*.ply);;PCD (*.pcd);;XYZ (*.xyz)"
@@ -1510,25 +1511,34 @@ class MainWindow(QMainWindow):
         self._current_view      : str | None = None
         self._measure_p1        : np.ndarray | None = None
 
-        # ── CAMBIO 2: verificar e57 y fijar IMPORT_FORMATS ────────────
+        # ── Formatos de importación según librerías disponibles ───────
+        exts   = list(self._IMPORT_EXTS_BASE)
+        avisos = []
+
         e57_ok, e57_msg = check_e57_support()
         if e57_ok:
-            self.IMPORT_FORMATS = self._IMPORT_FORMATS_FULL
+            exts.append("*.e57")
         else:
-            self.IMPORT_FORMATS = self._IMPORT_FORMATS_NO_E57
-            # El log todavía no existe; guardamos el aviso para emitirlo
-            # después de que _build_ui() construya self.log_box
-            self._pending_e57_warn = e57_msg
+            avisos.append(e57_msg)
+
+        las_ok, laz_ok, las_msg = check_las_support()
+        if las_ok:
+            exts.append("*.las")
+            if laz_ok:
+                exts.append("*.laz")
+        if not (las_ok and laz_ok):
+            avisos.append(las_msg)
+
+        self.IMPORT_FORMATS = f"Point Cloud ({' '.join(exts)})"
 
         self._build_ui()
         self._build_menu()
         self._build_toolbar()
         self._connect_signals()
 
-        # Emitir aviso e57 si corresponde (log_box ya existe aquí)
-        if hasattr(self, "_pending_e57_warn"):
-            self._log(f"  ℹ️  {self._pending_e57_warn}")
-            del self._pending_e57_warn
+        # Emitir avisos de formatos no disponibles (log_box ya existe)
+        for aviso in avisos:
+            self._log(f"  ℹ️  {aviso}")
 
         self._status("Listo — carga una nube de puntos para comenzar")
 
