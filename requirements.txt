@@ -16,3 +16,11 @@ vispy>=0.14
 # correspondiente no aparece en el diálogo de carga (se avisa en el log).
 laspy[lazrs]>=2.5     # .las / .laz  (LiDAR)
 # pye57>=0.4          # .e57         (descomentar si se necesita)
+
+# ── Reconstrucción por Poisson diferenciable (opcional) ───────────────
+# Habilitan el método «Poisson diferenciable (GPU)» del bloque B. Sin
+# ellos el método no aparece en la interfaz y el resto funciona igual.
+# Para GPU, instalar torch desde el índice de PyTorch:
+#   pip install torch --index-url https://download.pytorch.org/whl/cu121
+# torch>=2.5          # solucionador espectral en GPU
+# scikit-image>=0.22  # marching cubes

@@ -45,6 +45,7 @@ from core.solidifier    import MeshSolidifier
 # ── CAMBIO 1: nuevo import ─────────────────────────────────────────────────────
 from core.io_loader import (PointCloudLoader, check_e57_support,
                             check_las_support)
+from core.dpsr      import check_dpsr_support
 
 # ── Capa de presentación ──────────────────────────────────────────────────────
 from ui import theme
@@ -723,6 +724,13 @@ class ParamPanel(QScrollArea):
                                 ("Ball Pivoting", "ball_pivoting"),
                                 ("Alpha Shape",   "alpha_shape")):
             self.rec_method.addItem(etiqueta, clave)
+
+        # El método DPSR solo aparece si sus dependencias opcionales están
+        # instaladas, igual que se hace con los formatos .e57 y .las.
+        self.dpsr_disponible, self.dpsr_mensaje = check_dpsr_support()
+        if self.dpsr_disponible:
+            self.rec_method.addItem("Poisson diferenciable (GPU)", "dpsr")
+
         gml.addWidget(self.rec_method, 0, 1)
 
         lay.addWidget(g_method)
@@ -794,6 +802,43 @@ class ParamPanel(QScrollArea):
         self.alpha_ds.setValue(1)
         gal.addWidget(self.alpha_ds, 3, 1)
         lay.addWidget(self.g_alpha)
+
+        # ── DPSR ────────────────────────────────────────────────────────
+        self.g_dpsr = QGroupBox("Parámetros de Poisson diferenciable")
+        gdp = QGridLayout(self.g_dpsr)
+
+        gdp.addWidget(QLabel("Resolución:"), 0, 0)
+        self.dpsr_res = QComboBox()
+        for r in (64, 96, 128, 192, 256):
+            self.dpsr_res.addItem(f"{r}³", r)
+        self.dpsr_res.setCurrentIndex(2)          # 128³
+        gdp.addWidget(self.dpsr_res, 0, 1)
+
+        gdp.addWidget(QLabel("Suavizado σ:"), 1, 0)
+        self.dpsr_sigma = QDoubleSpinBox()
+        self.dpsr_sigma.setRange(0.5, 6.0)
+        self.dpsr_sigma.setSingleStep(0.5)
+        self.dpsr_sigma.setValue(1.5)
+        gdp.addWidget(self.dpsr_sigma, 1, 1)
+
+        gdp.addWidget(QLabel("Procesar en:"), 2, 0)
+        self.dpsr_device = QComboBox()
+        for etiqueta, clave in (("Automático", "auto"),
+                                ("GPU (CUDA)", "cuda"),
+                                ("CPU",        "cpu")):
+            self.dpsr_device.addItem(etiqueta, clave)
+        gdp.addWidget(self.dpsr_device, 2, 1)
+
+        nota_dpsr = QLabel(
+            "ℹ️ La malla sale cerrada por construcción: no hace falta el "
+            "paso C. No usa ningún modelo preentrenado."
+        )
+        nota_dpsr.setWordWrap(True)
+        nota_dpsr.setStyleSheet(
+            theme.label_style(theme.TEXT_SUBTLE, theme.FONT_SM))
+        gdp.addWidget(nota_dpsr, 3, 0, 1, 2)
+
+        lay.addWidget(self.g_dpsr)
 
         # El campo activo depende del modo: así queda claro cuál de los dos
         # valores se está aplicando de verdad.
@@ -882,7 +927,25 @@ class ParamPanel(QScrollArea):
                 "mejor opción general.<br><b>Ball Pivoting</b>: triangula los "
                 "puntos reales (fiel a los datos, pero deja agujeros)."
                 "<br><b>Alpha Shape</b>: envolvente ajustada, útil para "
-                "formas simples.",
+                "formas simples."
+                "<br><b>Poisson diferenciable</b>: resuelve la misma "
+                "ecuación por FFT en la GPU. Su malla es cerrada por "
+                "construcción, así que no necesita el paso C. No usa "
+                "ningún modelo preentrenado.",
+            self.dpsr_res:
+                "Lado de la grilla donde se resuelve la ecuación. Más "
+                "resolución = más detalle pero muchos más triángulos: 64³ "
+                "produce una malla del orden de la del pipeline clásico, "
+                "256³ unas 17 veces más pesada.",
+            self.dpsr_sigma:
+                "Ancho del suavizado en el dominio de la frecuencia, en "
+                "celdas. Cumple el papel del suavizado del Poisson clásico. "
+                "Valores bajos conservan detalle pero pueden dejar burbujas "
+                "sueltas; valores altos redondean el objeto.",
+            self.dpsr_device:
+                "Dónde resolver la FFT. En GPU tarda milisegundos; en CPU "
+                "es viable pero bastante más lento. «Automático» usa la GPU "
+                "si hay una disponible.",
             self.poisson_depth:
                 "Profundidad del octree = resolución de la superficie. 8–9 "
                 "para objetos simples, 10–11 para detalle fino. Cada +1 "
@@ -952,6 +1015,13 @@ class ParamPanel(QScrollArea):
         self.g_poisson.setVisible(metodo == "poisson")
         self.g_bp.setVisible(metodo == "ball_pivoting")
         self.g_alpha.setVisible(metodo == "alpha_shape")
+        self.g_dpsr.setVisible(metodo == "dpsr")
+
+        # DPSR entrega una malla cerrada; el filtro de zonas huecas la
+        # abriría. Se desmarca al elegirlo, pero se deja accesible por si
+        # el usuario quiere compararlo.
+        if metodo == "dpsr":
+            self.remove_hollow.setChecked(False)
 
     def _on_smooth_method_changed(self, *_):
         """Muestra solo los parámetros del suavizado activo."""
@@ -1158,6 +1228,9 @@ class ParamPanel(QScrollArea):
                                    else "absolute"),
             "bp_radius_factor"  : self.bp_radius_factor.value(),
             "bp_radius"         : self.bp_radius.value(),
+            "dpsr_resolution"   : self.dpsr_res.currentData(),
+            "dpsr_sigma"        : self.dpsr_sigma.value(),
+            "dpsr_device"       : self.dpsr_device.currentData(),
             "alpha_mode"        : ("relative"
                                    if self.alpha_mode.currentIndex() == 0
                                    else "absolute"),
@@ -1623,6 +1696,9 @@ class MainWindow(QMainWindow):
                 exts.append("*.laz")
         if not (las_ok and laz_ok):
             avisos.append(las_msg)
+
+        # Método de reconstrucción por GPU (dependencias opcionales)
+        avisos.append(check_dpsr_support()[1])
 
         self.IMPORT_FORMATS = f"Point Cloud ({' '.join(exts)})"
 
@@ -3139,6 +3215,7 @@ class MainWindow(QMainWindow):
         "poisson"       : "Poisson",
         "ball_pivoting" : "Ball Pivoting",
         "alpha_shape"   : "Alpha Shape",
+        "dpsr"          : "Poisson diferenciable",
     }
 
     def _update_quality_panel(self, stats: dict):

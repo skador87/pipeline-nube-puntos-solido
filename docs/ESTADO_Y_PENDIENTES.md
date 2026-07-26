@@ -153,6 +153,38 @@ volumen, preservación de curvatura. Argumentos cuantitativos para la memoria.
 **3.4 Procesamiento por bloques** con solape, para nubes de 1M+ puntos sin
 submuestrear (hoy hay que bajar la densidad).
 
+### Fase 5 — Modos basados en IA (nueva)
+
+**5.1 Poisson diferenciable (DPSR) en el bloque B.** ✅
+Implementado en `core/dpsr.py` desde las ecuaciones de Shape As Points
+(NeurIPS 2021), sin copiar su código y sin sus dependencias problemáticas en
+Windows. Aparece como cuarto método de reconstrucción si `torch` y
+`scikit-image` están instalados. **Su malla es cerrada por construcción**
+(`holes_found = 0` al llegar al paso C).
+
+⚠️ **No es un modelo preentrenado**: no hay pesos ni dataset. Ver
+[`RECONSTRUCCION_IA.md`](RECONSTRUCCION_IA.md) §1 antes de describirlo en la
+memoria.
+
+Resultado medido sobre el bunny: el pipeline clásico sigue ganando en
+fidelidad media (0,5861 % frente a 0,6095 %) con 17× menos triángulos, pero
+DPSR cierra en un solo paso, es 4× más rápido y tiene mejor error en la cola
+(p95 0,99 % frente a 1,50 %). Tabla completa en `RECONSTRUCCION_IA.md` §4.
+
+**5.2 Bucle de optimización por forma.** ← siguiente
+Es donde está el valor real de que el solucionador sea derivable: optimizar
+posiciones y normales para minimizar la distancia a la nube observada. Sin
+esto, DPSR es solo un Poisson no cribado sobre GPU. Requiere resolver la
+propagación de gradientes a través del marching cubes.
+
+**5.3 Comparación sobre datos difíciles.** S3DIS, LiDAR y escaneos de una
+sola cara. Es la prueba que puede invertir el veredicto del bunny, que es el
+mejor caso posible para el método clásico.
+
+**5.4 Normales aprendidas en el paso A** (SHS-Net / OCMG-Net). Probablemente
+la mejora de mayor impacto: tanto Poisson como DPSR dependen por completo de
+que las normales estén bien orientadas. Se solapa con el pendiente 3.2.
+
 ### Fase 4 — UX
 
 **4.1 Mensajes de error e interfaz** (`ux-copy`). ✅

@@ -149,6 +149,44 @@ def test_parametros_relativos_a_la_escala():
     )
 
 
+def test_dpsr_produce_solido_cerrado():
+    """
+    El método de Poisson diferenciable debe entregar una malla CERRADA sin
+    pasar por el paso C: esa es su razón de ser. Si algún día deja de
+    cerrarse, el método pierde su ventaja frente al Poisson clásico.
+
+    Se omite si torch o scikit-image no están instalados, porque son
+    dependencias opcionales.
+    """
+    from core.dpsr import check_dpsr_support
+    disponible, mensaje = check_dpsr_support()
+    if not disponible:
+        print(f"    (omitido: {mensaje})")
+        return
+
+    from core.solidifier import MeshSolidifier
+
+    pcd = _nube_limpia()
+    mesh, st = MeshReconstructor(pcd, log_callback=mute).run({
+        "method": "dpsr", "remove_hollow": False,
+    })
+
+    assert MeshSolidifier.is_topologically_closed(mesh), (
+        f"DPSR entregó una malla abierta "
+        f"({MeshSolidifier._boundary_edge_count(mesh):,} aristas frontera); "
+        f"su ventaja es precisamente el cierre por construcción"
+    )
+
+    vol = MeshSolidifier.signed_volume(mesh)
+    desvio = abs(vol - REF_VOLUMEN) / REF_VOLUMEN
+    assert desvio <= 0.05, (
+        f"el volumen de DPSR ({vol:.6f}) se desvía {desvio:.1%} de la "
+        f"referencia {REF_VOLUMEN:.6f}: la solución de Poisson espectral "
+        f"podría estar mal escalada"
+    )
+    assert st["dpsr_resolution"] > 0 and st["dpsr_device"] in ("cuda", "cpu")
+
+
 def test_metodos_alternativos_terminan():
     """
     ball_pivoting y alpha_shape con sus valores por defecto deben producir

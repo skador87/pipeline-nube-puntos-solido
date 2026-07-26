@@ -17,7 +17,11 @@ class MeshReconstructor:
     Parámetros esperados en el dict params
     ──────────────────────────────────────
     method               : str   — "poisson" | "ball_pivoting" | "alpha_shape"
+                                   | "dpsr"
     poisson_depth        : int   — profundidad octree Poisson
+    dpsr_resolution      : int   — lado de la grilla del Poisson diferenciable
+    dpsr_sigma           : float — suavizado espectral del DPSR, en celdas
+    dpsr_device          : str   — "auto" | "cuda" | "cpu"
     bp_radius_mode       : str   — "relative" (× d̄) | "absolute"
     bp_radius_factor     : float — múltiplo de d̄ si el modo es relativo
     bp_radius            : float — radio Ball Pivoting si el modo es absoluto
@@ -60,6 +64,11 @@ class MeshReconstructor:
         "alpha_factor"      : 5.0,
         "alpha"             : 0.1,
         "alpha_downsample"  : 1,
+        # DPSR (Poisson diferenciable). σ=1.5 y 128³ es el punto medido con
+        # mejor relación fidelidad/peso sobre el bunny; ver docs.
+        "dpsr_resolution"   : 128,
+        "dpsr_sigma"        : 1.5,
+        "dpsr_device"       : "auto",
         "remove_webbing"    : True,
         "remove_hollow"     : True,
         "smooth_method"     : "taubin",
@@ -231,6 +240,11 @@ class MeshReconstructor:
                 alpha,
                 int(p["alpha_downsample"]),
             )
+
+        elif p["method"] == "dpsr":
+            self.mesh, dpsr_stats = self._dpsr(p)
+            stats.update(dpsr_stats)
+
         else:
             raise ValueError(f"Método desconocido: {p['method']}")
 
@@ -248,6 +262,13 @@ class MeshReconstructor:
 
         # ── Paso 3: Filtro zonas huecas ────────────────────────────────────
         if p["remove_hollow"]:
+            # Con DPSR la malla llega cerrada por construcción; este filtro
+            # elimina triángulos y por tanto la abre. Se avisa porque anula
+            # la principal ventaja del método.
+            if p["method"] == "dpsr":
+                self._log("  ⚠️  El filtro de zonas huecas abrirá la malla "
+                          "cerrada que produjo DPSR. Desactívalo si quieres "
+                          "conservar el cierre garantizado.")
             self._log("  🧹 Eliminando zonas huecas...")
             self.mesh = self._filter_by_mesh_thickness(self.mesh)
         stats["after_hollow_triangles"] = len(self.mesh.triangles)
@@ -329,6 +350,35 @@ class MeshReconstructor:
         self._log(f"    Inicial: {len(mesh.vertices):,} vért, "
                   f"{len(mesh.triangles):,} tri")
         return mesh
+
+    def _dpsr(self, p: dict) -> tuple[o3d.geometry.TriangleMesh, dict]:
+        """
+        Poisson diferenciable (DPSR) sobre grilla densa, resuelto por FFT.
+
+        A diferencia de los otros tres métodos, la salida es CERRADA POR
+        CONSTRUCCIÓN: es la superficie de nivel de una función continua, así
+        que no puede tener bordes. Eso hace que los filtros de artefactos y
+        el paso C sean opcionales en este camino.
+
+        Las dependencias (torch, scikit-image) son opcionales: si faltan, el
+        método no aparece en la interfaz y aquí se falla con un mensaje que
+        dice cómo instalarlas.
+        """
+        from core.dpsr import check_dpsr_support, reconstruct
+
+        disponible, mensaje = check_dpsr_support()
+        if not disponible:
+            raise RuntimeError(mensaje)
+
+        device = str(p.get("dpsr_device", "auto"))
+        mesh, stats = reconstruct(
+            self.pcd,
+            resolution   = int(p["dpsr_resolution"]),
+            sigma        = float(p["dpsr_sigma"]),
+            device       = None if device == "auto" else device,
+            log_callback = self._log,
+        )
+        return mesh, stats
 
     # ══════════════════════════════════════════════════════════════
     #  LIMPIEZA DE ARTEFACTOS
