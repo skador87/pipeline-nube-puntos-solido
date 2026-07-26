@@ -26,6 +26,7 @@ from PyQt5.QtWidgets import (
     QFileDialog, QProgressBar, QTabWidget,
     QSizePolicy, QFrame, QAction, QToolBar,
     QStatusBar, QMessageBox, QMenu, QStackedWidget,
+    QToolButton,
 )
 from PyQt5.QtCore  import Qt, QThread, pyqtSignal, QTimer
 from PyQt5.QtGui   import QFont, QColor, QPalette, QIcon, QSurfaceFormat
@@ -45,97 +46,20 @@ from core.solidifier    import MeshSolidifier
 from core.io_loader import (PointCloudLoader, check_e57_support,
                             check_las_support)
 
+# ── Capa de presentación ──────────────────────────────────────────────────────
+from ui import theme
+from ui import formato as fmt
+from ui.widgets import PasoPipeline, SeparadorPaso, EstadoVacio
+
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  TEMA OSCURO
 # ══════════════════════════════════════════════════════════════════════════════
 
 def apply_dark_theme(app: QApplication):
-    app.setStyle("Fusion")
-    pal = QPalette()
-
-    dark   = QColor(30,  30,  35)
-    mid    = QColor(45,  45,  52)
-    light  = QColor(60,  60,  68)
-    text   = QColor(220, 220, 220)
-    accent = QColor(70,  130, 180)
-    hilite = QColor(80,  150, 200)
-
-    pal.setColor(QPalette.Window,          dark)
-    pal.setColor(QPalette.WindowText,      text)
-    pal.setColor(QPalette.Base,            mid)
-    pal.setColor(QPalette.AlternateBase,   light)
-    pal.setColor(QPalette.ToolTipBase,     dark)
-    pal.setColor(QPalette.ToolTipText,     text)
-    pal.setColor(QPalette.Text,            text)
-    pal.setColor(QPalette.Button,          mid)
-    pal.setColor(QPalette.ButtonText,      text)
-    pal.setColor(QPalette.BrightText,      Qt.white)
-    pal.setColor(QPalette.Link,            accent)
-    pal.setColor(QPalette.Highlight,       hilite)
-    pal.setColor(QPalette.HighlightedText, Qt.white)
-    pal.setColor(QPalette.Disabled, QPalette.Text,       QColor(120, 120, 120))
-    pal.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(120, 120, 120))
-
-    app.setPalette(pal)
-
-    app.setStyleSheet("""
-        QGroupBox {
-            border: 1px solid #3a3a44;
-            border-radius: 4px;
-            margin-top: 8px;
-            padding-top: 4px;
-            font-weight: bold;
-        }
-        QGroupBox::title {
-            subcontrol-origin: margin;
-            left: 8px;
-            color: #82b4d0;
-        }
-        QPushButton {
-            background-color: #2d2d36;
-            border: 1px solid #4a4a58;
-            border-radius: 4px;
-            padding: 4px 10px;
-            min-height: 24px;
-        }
-        QPushButton:hover  { background-color: #3a3a48; border-color: #6688aa; }
-        QPushButton:pressed{ background-color: #1e1e28; }
-        QPushButton:disabled{ color: #666; border-color: #333; }
-        QTabWidget::pane   { border: 1px solid #3a3a44; }
-        QTabBar::tab {
-            background: #2a2a32;
-            padding: 5px 14px;
-            border: 1px solid #3a3a44;
-        }
-        QTabBar::tab:selected { background: #3c3c50; color: #aad0f0; }
-        QScrollBar:vertical {
-            background: #2a2a32; width: 8px;
-        }
-        QScrollBar::handle:vertical {
-            background: #4a4a5a; border-radius: 4px;
-        }
-        QTextEdit {
-            background-color: #1a1a22;
-            color: #b0d0b0;
-            font-family: monospace;
-            font-size: 11px;
-            border: 1px solid #3a3a44;
-        }
-        QProgressBar {
-            border: 1px solid #3a3a44;
-            border-radius: 3px;
-            text-align: center;
-            background: #1e1e28;
-        }
-        QProgressBar::chunk { background-color: #4682b4; border-radius: 2px; }
-        QComboBox { background: #2d2d36; border: 1px solid #4a4a58;
-                    border-radius: 3px; padding: 2px 6px; }
-        QSpinBox, QDoubleSpinBox {
-            background: #2d2d36; border: 1px solid #4a4a58;
-            border-radius: 3px; padding: 2px 4px;
-        }
-    """)
+    """Aplica el tema. La definición vive en `ui/theme.py` como tokens; aquí
+    solo queda el punto de entrada, que se mantiene por compatibilidad."""
+    theme.apply(app)
 
 
 def _tt(texto: str) -> str:
@@ -491,6 +415,14 @@ class ParamPanel(QScrollArea):
         if index == 0:
             self._apply_basic_presets()
 
+    @staticmethod
+    def _set_combo_por_clave(combo: QComboBox, clave: str):
+        """Selecciona el elemento cuyo `userData` es `clave`. Los combos
+        muestran nombres legibles, así que no se puede usar setCurrentText."""
+        idx = combo.findData(clave)
+        if idx >= 0:
+            combo.setCurrentIndex(idx)
+
     def _apply_basic_presets(self):
         """
         Traduce las categorías del modo básico (por proceso A/B/C) a los
@@ -526,7 +458,7 @@ class ParamPanel(QScrollArea):
 
         # ══ B · Reconstrucción ══════════════════════════════════════════
         # Nivel de detalle: profundidad Poisson
-        self.rec_method.setCurrentText("poisson")
+        self._set_combo_por_clave(self.rec_method, "poisson")
         self.poisson_depth.setValue(
             [8, 10, 11][self.basic_detail.currentIndex()])
 
@@ -536,9 +468,9 @@ class ParamPanel(QScrollArea):
             self.basic_smooth_label.setText(self._SMOOTH_LEVELS[nivel])
         iters = [0, 3, 5, 10][nivel]
         if iters == 0:
-            self.smooth_method.setCurrentText("none")
+            self._set_combo_por_clave(self.smooth_method, "none")
         else:
-            self.smooth_method.setCurrentText("taubin")
+            self._set_combo_por_clave(self.smooth_method, "taubin")
             self.smooth_iter.setValue(iters)
             self.taubin_lambda.setValue(0.5)
             self.taubin_mu.setValue(-0.53)
@@ -785,56 +717,83 @@ class ParamPanel(QScrollArea):
 
         gml.addWidget(QLabel("Método:"), 0, 0)
         self.rec_method = QComboBox()
-        self.rec_method.addItems(["poisson", "ball_pivoting", "alpha_shape"])
+        # Nombre legible en la interfaz, identificador interno como dato:
+        # `get_rec_params` sigue devolviendo las mismas claves de siempre.
+        for etiqueta, clave in (("Poisson",       "poisson"),
+                                ("Ball Pivoting", "ball_pivoting"),
+                                ("Alpha Shape",   "alpha_shape")):
+            self.rec_method.addItem(etiqueta, clave)
         gml.addWidget(self.rec_method, 0, 1)
 
-        gml.addWidget(QLabel("Poisson depth:"), 1, 0)
+        lay.addWidget(g_method)
+
+        # ── Parámetros específicos de cada método ───────────────────────
+        # Cada método vive en su propio grupo y solo se muestra el del
+        # método elegido. Antes, con Poisson seleccionado (el caso por
+        # defecto), 7 de las 9 filas del panel eran parámetros que no se
+        # aplicaban a nada.
+        self.g_poisson = QGroupBox("Parámetros de Poisson")
+        gpo = QGridLayout(self.g_poisson)
+        gpo.addWidget(QLabel("Profundidad:"), 0, 0)
         self.poisson_depth = QSpinBox()
         self.poisson_depth.setRange(4, 16)
         self.poisson_depth.setValue(10)
-        gml.addWidget(self.poisson_depth, 1, 1)
+        gpo.addWidget(self.poisson_depth, 0, 1)
+        lay.addWidget(self.g_poisson)
 
-        gml.addWidget(QLabel("BP radio — modo:"), 2, 0)
+        self.g_bp = QGroupBox("Parámetros de Ball Pivoting")
+        gbp = QGridLayout(self.g_bp)
+        gbp.addWidget(QLabel("Radio:"), 0, 0)
         self.bp_radius_mode = QComboBox()
         self.bp_radius_mode.addItems(["relativo a d̄", "absoluto"])
-        gml.addWidget(self.bp_radius_mode, 2, 1)
+        gbp.addWidget(self.bp_radius_mode, 0, 1)
 
-        gml.addWidget(QLabel("    factor × d̄:"), 3, 0)
+        gbp.addWidget(QLabel("Factor × d̄:"), 1, 0)
         self.bp_radius_factor = QDoubleSpinBox()
         self.bp_radius_factor.setRange(0.5, 20.0)
         self.bp_radius_factor.setSingleStep(0.5)
         self.bp_radius_factor.setValue(2.0)
-        gml.addWidget(self.bp_radius_factor, 3, 1)
+        gbp.addWidget(self.bp_radius_factor, 1, 1)
 
-        gml.addWidget(QLabel("    valor absoluto:"), 4, 0)
+        gbp.addWidget(QLabel("Valor absoluto:"), 2, 0)
         self.bp_radius = QDoubleSpinBox()
         self.bp_radius.setRange(0.0001, 10.0)
         self.bp_radius.setSingleStep(0.001)
         self.bp_radius.setDecimals(4)
         self.bp_radius.setValue(1.0)
         self.bp_radius.setEnabled(False)
-        gml.addWidget(self.bp_radius, 4, 1)
+        gbp.addWidget(self.bp_radius, 2, 1)
+        lay.addWidget(self.g_bp)
 
-        gml.addWidget(QLabel("Alpha — modo:"), 5, 0)
+        self.g_alpha = QGroupBox("Parámetros de Alpha Shape")
+        gal = QGridLayout(self.g_alpha)
+        gal.addWidget(QLabel("Alpha:"), 0, 0)
         self.alpha_mode = QComboBox()
         self.alpha_mode.addItems(["relativo a d̄", "absoluto"])
-        gml.addWidget(self.alpha_mode, 5, 1)
+        gal.addWidget(self.alpha_mode, 0, 1)
 
-        gml.addWidget(QLabel("    factor × d̄:"), 6, 0)
+        gal.addWidget(QLabel("Factor × d̄:"), 1, 0)
         self.alpha_factor = QDoubleSpinBox()
         self.alpha_factor.setRange(0.5, 50.0)
         self.alpha_factor.setSingleStep(0.5)
         self.alpha_factor.setValue(5.0)
-        gml.addWidget(self.alpha_factor, 6, 1)
+        gal.addWidget(self.alpha_factor, 1, 1)
 
-        gml.addWidget(QLabel("    valor absoluto:"), 7, 0)
+        gal.addWidget(QLabel("Valor absoluto:"), 2, 0)
         self.alpha_val = QDoubleSpinBox()
         self.alpha_val.setRange(0.0001, 5.0)
         self.alpha_val.setSingleStep(0.001)
         self.alpha_val.setDecimals(4)
         self.alpha_val.setValue(0.1)
         self.alpha_val.setEnabled(False)
-        gml.addWidget(self.alpha_val, 7, 1)
+        gal.addWidget(self.alpha_val, 2, 1)
+
+        gal.addWidget(QLabel("Submuestreo:"), 3, 0)
+        self.alpha_ds = QSpinBox()
+        self.alpha_ds.setRange(1, 20)
+        self.alpha_ds.setValue(1)
+        gal.addWidget(self.alpha_ds, 3, 1)
+        lay.addWidget(self.g_alpha)
 
         # El campo activo depende del modo: así queda claro cuál de los dos
         # valores se está aplicando de verdad.
@@ -846,14 +805,7 @@ class ParamPanel(QScrollArea):
             lambda i: (self.alpha_factor.setEnabled(i == 0),
                        self.alpha_val.setEnabled(i == 1))
         )
-
-        gml.addWidget(QLabel("Alpha downsample:"), 8, 0)
-        self.alpha_ds = QSpinBox()
-        self.alpha_ds.setRange(1, 20)
-        self.alpha_ds.setValue(1)
-        gml.addWidget(self.alpha_ds, 8, 1)
-
-        lay.addWidget(g_method)
+        self.rec_method.currentTextChanged.connect(self._on_rec_method_changed)
 
         g_clean = QGroupBox("Limpieza de artefactos")
         gcl     = QVBoxLayout(g_clean)
@@ -873,47 +825,63 @@ class ParamPanel(QScrollArea):
 
         gsl.addWidget(QLabel("Método:"), 0, 0)
         self.smooth_method = QComboBox()
-        self.smooth_method.addItems(["none", "taubin", "laplacian"])
+        for etiqueta, clave in (("Sin suavizado", "none"),
+                                ("Taubin",        "taubin"),
+                                ("Laplaciano",    "laplacian")):
+            self.smooth_method.addItem(etiqueta, clave)
         self.smooth_method.setCurrentIndex(1)
         gsl.addWidget(self.smooth_method, 0, 1)
 
-        gsl.addWidget(QLabel("Iteraciones:"), 1, 0)
+        self.lbl_smooth_iter = QLabel("Iteraciones:")
+        gsl.addWidget(self.lbl_smooth_iter, 1, 0)
         self.smooth_iter = QSpinBox()
         self.smooth_iter.setRange(1, 50)
         self.smooth_iter.setValue(5)
         gsl.addWidget(self.smooth_iter, 1, 1)
 
-        gsl.addWidget(QLabel("Taubin λ:"), 2, 0)
+        # Taubin y Laplaciano tienen parámetros propios y excluyentes: solo
+        # se muestran los del método activo.
+        self.lbl_taubin_lambda = QLabel("Taubin λ:")
+        gsl.addWidget(self.lbl_taubin_lambda, 2, 0)
         self.taubin_lambda = QDoubleSpinBox()
         self.taubin_lambda.setRange(0.01, 1.0)
         self.taubin_lambda.setSingleStep(0.01)
         self.taubin_lambda.setValue(0.5)
         gsl.addWidget(self.taubin_lambda, 2, 1)
 
-        gsl.addWidget(QLabel("Taubin μ:"), 3, 0)
+        self.lbl_taubin_mu = QLabel("Taubin μ:")
+        gsl.addWidget(self.lbl_taubin_mu, 3, 0)
         self.taubin_mu = QDoubleSpinBox()
         self.taubin_mu.setRange(-1.0, -0.01)
         self.taubin_mu.setSingleStep(0.01)
         self.taubin_mu.setValue(-0.53)
         gsl.addWidget(self.taubin_mu, 3, 1)
 
-        gsl.addWidget(QLabel("Laplacian λ:"), 4, 0)
+        self.lbl_laplacian_lambda = QLabel("Laplaciano λ:")
+        gsl.addWidget(self.lbl_laplacian_lambda, 4, 0)
         self.laplacian_lambda = QDoubleSpinBox()
         self.laplacian_lambda.setRange(0.01, 1.0)
         self.laplacian_lambda.setSingleStep(0.01)
         self.laplacian_lambda.setValue(0.5)
         gsl.addWidget(self.laplacian_lambda, 4, 1)
 
+        self.smooth_method.currentIndexChanged.connect(
+            self._on_smooth_method_changed)
+
         lay.addWidget(g_smooth)
         lay.addStretch()
+
+        # Estado inicial coherente con el método seleccionado
+        self._on_rec_method_changed()
+        self._on_smooth_method_changed()
 
         # ── Tooltips explicativos ───────────────────────────────────────
         tips = {
             self.rec_method:
-                "<b>poisson</b>: superficie implícita, cerrada y suave — la "
-                "mejor opción general.<br><b>ball_pivoting</b>: triangula los "
+                "<b>Poisson</b>: superficie implícita, cerrada y suave — la "
+                "mejor opción general.<br><b>Ball Pivoting</b>: triangula los "
                 "puntos reales (fiel a los datos, pero deja agujeros)."
-                "<br><b>alpha_shape</b>: envolvente ajustada, útil para "
+                "<br><b>Alpha Shape</b>: envolvente ajustada, útil para "
                 "formas simples.",
             self.poisson_depth:
                 "Profundidad del octree = resolución de la superficie. 8–9 "
@@ -958,9 +926,9 @@ class ParamPanel(QScrollArea):
                 "la nube claramente a ambos lados (señal de doble pared). El "
                 "radio de análisis se adapta a la escala de la nube.",
             self.smooth_method:
-                "<b>taubin</b>: suaviza SIN encoger el objeto (recomendado)."
-                "<br><b>laplacian</b>: más simple pero encoge y redondea."
-                "<br><b>none</b>: sin suavizado.",
+                "<b>Taubin</b>: suaviza SIN encoger el objeto (recomendado)."
+                "<br><b>Laplaciano</b>: más simple pero encoge y redondea."
+                "<br><b>Sin suavizado</b>: conserva la malla tal cual.",
             self.smooth_iter:
                 "Iteraciones de suavizado. 5–10 típico con Taubin; muchas "
                 "iteraciones con Laplacian «derriten» el detalle.",
@@ -977,6 +945,27 @@ class ParamPanel(QScrollArea):
             w.setToolTip(_tt(tip))
 
         self.tabs.addTab(tab, "B · Rec")
+
+    def _on_rec_method_changed(self, *_):
+        """Muestra solo los parámetros del método de reconstrucción activo."""
+        metodo = self.rec_method.currentData()
+        self.g_poisson.setVisible(metodo == "poisson")
+        self.g_bp.setVisible(metodo == "ball_pivoting")
+        self.g_alpha.setVisible(metodo == "alpha_shape")
+
+    def _on_smooth_method_changed(self, *_):
+        """Muestra solo los parámetros del suavizado activo."""
+        metodo  = self.smooth_method.currentData()
+        activo  = metodo != "none"
+        taubin  = metodo == "taubin"
+
+        for w in (self.lbl_smooth_iter, self.smooth_iter):
+            w.setVisible(activo)
+        for w in (self.lbl_taubin_lambda, self.taubin_lambda,
+                  self.lbl_taubin_mu, self.taubin_mu):
+            w.setVisible(activo and taubin)
+        for w in (self.lbl_laplacian_lambda, self.laplacian_lambda):
+            w.setVisible(activo and not taubin)
 
     def _build_sol_tab(self):
         tab = QWidget()
@@ -1157,8 +1146,11 @@ class ParamPanel(QScrollArea):
         }
 
     def get_rec_params(self) -> dict:
+        # currentData() y no currentText(): los combos muestran nombres
+        # legibles («Ball Pivoting») pero devuelven las claves que espera el
+        # núcleo («ball_pivoting»).
         return {
-            "method"            : self.rec_method.currentText(),
+            "method"            : self.rec_method.currentData(),
             "poisson_depth"     : self.poisson_depth.value(),
             # Índice 0 = "relativo a d̄", 1 = "absoluto"
             "bp_radius_mode"    : ("relative"
@@ -1174,7 +1166,7 @@ class ParamPanel(QScrollArea):
             "alpha_downsample"  : self.alpha_ds.value(),
             "remove_webbing"    : self.remove_webbing.isChecked(),
             "remove_hollow"     : self.remove_hollow.isChecked(),
-            "smooth_method"     : self.smooth_method.currentText(),
+            "smooth_method"     : self.smooth_method.currentData(),
             "smooth_iterations" : self.smooth_iter.value(),
             "taubin_lambda"     : self.taubin_lambda.value(),
             "taubin_mu"         : self.taubin_mu.value(),
@@ -1594,6 +1586,9 @@ class MainWindow(QMainWindow):
 
         self._undo_stack  : dict | None = None
         self._worker      : WorkerThread | None = None
+        # Bloque en ejecución, para que el paso correspondiente se marque
+        # como «corriendo» en el panel.
+        self._running_block : str | None = None
 
         # Historial de transformaciones (matrices 4×4) para poder
         # deshacerlas; se limpia cuando el pipeline genera productos
@@ -1640,7 +1635,10 @@ class MainWindow(QMainWindow):
         for aviso in avisos:
             self._log(f"  ℹ️  {aviso}")
 
-        self._status("Listo — carga una nube de puntos para comenzar")
+        # Estado inicial: sin datos, con el visor mostrando qué hacer.
+        self._mostrar_estado_vacio(True)
+        self._refresh_pipeline_state()
+        self._status("Carga una nube de puntos para empezar")
 
     # ══════════════════════════════════════════════════════════════
     #  CONSTRUCCIÓN DE LA UI  (sin cambios respecto al original)
@@ -1661,20 +1659,46 @@ class MainWindow(QMainWindow):
 
         center_widget = QWidget()
         cv = QVBoxLayout(center_widget)
-        cv.setSpacing(4)
+        cv.setSpacing(theme.SPACE_2)
         cv.setContentsMargins(0, 0, 0, 0)
-
-        self.viewport = Viewport3D()
 
         # Barra de edición adosada al borde superior del visor
         self.edit_toolbar = self._build_edit_toolbar()
         cv.addWidget(self.edit_toolbar)
-        cv.addWidget(self.viewport, stretch=7)
+
+        # ── Visor con overlay de estado vacío ───────────────────────────
+        # El overlay se superpone en lugar de sustituir al visor: ocultar un
+        # widget OpenGL puede hacer que el driver destruya su contexto, y
+        # este proyecto ya arrastra access violations por tocar buffers GL.
+        # Así el visor nunca cambia de visibilidad.
+        self.viewport_container = QWidget()
+        vc = QVBoxLayout(self.viewport_container)
+        vc.setContentsMargins(0, 0, 0, 0)
+        self.viewport = Viewport3D()
+        vc.addWidget(self.viewport)
+
+        self.empty_state = EstadoVacio(
+            "Sin nube de puntos",
+            "Carga un archivo .ply, .pcd, .xyz, .txt, .las, .laz o .e57 "
+            "para empezar. Después ejecuta los pasos A, B y C del panel "
+            "de la derecha, en ese orden.",
+            parent=self.viewport_container,
+        )
+
+        # El visor y el registro comparten un splitter: el registro pasa de
+        # ocupar 160 px fijos a poder plegarse cuando estorba o crecer
+        # cuando hay que leerlo.
+        self.center_splitter = QSplitter(Qt.Vertical)
+        self.center_splitter.addWidget(self.viewport_container)
 
         self.log_box = QTextEdit()
         self.log_box.setReadOnly(True)
-        self.log_box.setMaximumHeight(160)
-        cv.addWidget(self.log_box, stretch=2)
+        self.log_box.setMinimumHeight(0)
+        self.center_splitter.addWidget(self.log_box)
+        self.center_splitter.setStretchFactor(0, 5)
+        self.center_splitter.setStretchFactor(1, 1)
+        self.center_splitter.setSizes([620, 150])
+        cv.addWidget(self.center_splitter, stretch=1)
 
         self.progress_bar = QProgressBar()
         self.progress_bar.setVisible(False)
@@ -1686,26 +1710,37 @@ class MainWindow(QMainWindow):
         right_panel = self._build_right_panel()
         splitter.addWidget(right_panel)
 
-        splitter.setSizes([290, 870, 240])
+        splitter.setStretchFactor(1, 1)
+        splitter.setSizes([300, 830, 268])
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
 
     def _build_right_panel(self) -> QWidget:
+        """
+        Panel derecho: el pipeline como secuencia y la calidad del resultado.
+
+        Antes esta columna contenía cinco grupos («Entrada/Salida»,
+        «Pipeline», «Visualización», «Edición», «Productos») cuyos botones ya
+        estaban todos en la barra de herramientas y en el menú — cada acción
+        existía tres o cuatro veces. Ahora las acciones globales viven solo en
+        la barra y el menú, y esta columna se dedica a lo que no cabe en
+        ninguna de las dos: en qué punto del pipeline estás, qué produjo cada
+        etapa, y si el sólido resultante es bueno.
+        """
+        contenedor = QScrollArea()
+        contenedor.setWidgetResizable(True)
+        contenedor.setFixedWidth(268)
+        contenedor.setHorizontalScrollBarPolicy(Qt.ScrollBarAlwaysOff)
+
         w   = QWidget()
         lay = QVBoxLayout(w)
-        lay.setSpacing(8)
-        lay.setContentsMargins(4, 4, 4, 4)
-        w.setFixedWidth(240)
+        lay.setSpacing(theme.SPACE_4)
+        lay.setContentsMargins(theme.SPACE_3, theme.SPACE_3,
+                               theme.SPACE_3, theme.SPACE_3)
+        contenedor.setWidget(w)
 
-        g_io = QGroupBox("Entrada / Salida")
-        gio  = QVBoxLayout(g_io)
-
-        self.btn_load = QPushButton("📂 Cargar nube")
-        gio.addWidget(self.btn_load)
-
-        # Acciones de exportación por producto: se comparten entre el menú
-        # desplegable de este botón y el menú Archivo.
+        # ── Acciones de exportación (compartidas con el menú Archivo) ───
         self.act_export_cloud = QAction("Exportar nube de puntos…", self)
         self.act_export_cloud.triggered.connect(self._export_cloud)
         self.act_export_cloud.setEnabled(False)
@@ -1726,104 +1761,56 @@ class MainWindow(QMainWindow):
             "tiempos de cada bloque ejecutado en esta sesión. Es la "
             "trazabilidad de qué configuración produjo qué resultado."))
 
-        self.btn_export = QPushButton("💾 Exportar…")
-        self.btn_export.setEnabled(False)
-        menu_export = QMenu(self.btn_export)
-        menu_export.addAction(self.act_export_cloud)
-        menu_export.addAction(self.act_export_mesh)
-        menu_export.addAction(self.act_export_solid)
-        menu_export.addSeparator()
-        menu_export.addAction(self.act_export_report)
-        self.btn_export.setMenu(menu_export)
-        gio.addWidget(self.btn_export)
-
-        lay.addWidget(g_io)
-
+        # ── El pipeline como secuencia ──────────────────────────────────
         g_pipe = QGroupBox("Pipeline")
         gpipe  = QVBoxLayout(g_pipe)
+        gpipe.setSpacing(theme.SPACE_2)
+        gpipe.setContentsMargins(theme.SPACE_2, theme.SPACE_3,
+                                 theme.SPACE_2, theme.SPACE_3)
 
-        self.btn_preprocess  = QPushButton("A · Preprocesar")
-        self.btn_preprocess.setEnabled(False)
-        gpipe.addWidget(self.btn_preprocess)
+        self.paso_a = PasoPipeline(
+            "A", "Preprocesamiento",
+            "Limpia la nube, uniforma su densidad y estima las normales. "
+            "Es el paso que determina la calidad de todo lo que viene "
+            "después.")
+        self.paso_b = PasoPipeline(
+            "B", "Reconstrucción",
+            "Convierte la nube en una malla de triángulos y elimina los "
+            "artefactos que deja la reconstrucción.")
+        self.paso_c = PasoPipeline(
+            "C", "Solidificación",
+            "Cierra la malla hasta obtener un sólido estanco, probando "
+            "estrategias en cascada hasta que una cumpla el criterio de "
+            "fidelidad.")
 
-        self.btn_reconstruct = QPushButton("B · Reconstruir")
-        self.btn_reconstruct.setEnabled(False)
-        gpipe.addWidget(self.btn_reconstruct)
+        self.paso_a.ejecutar.connect(self._run_preprocess)
+        self.paso_b.ejecutar.connect(self._run_reconstruct)
+        self.paso_c.ejecutar.connect(self._run_solidify)
+        self.paso_a.ver.connect(self._show_clean_pcd)
+        self.paso_b.ver.connect(self._show_recon_mesh)
+        self.paso_c.ver.connect(self._show_solid_mesh)
 
-        self.btn_solidify    = QPushButton("C · Solidificar")
-        self.btn_solidify.setEnabled(False)
-        gpipe.addWidget(self.btn_solidify)
+        for i, paso in enumerate((self.paso_a, self.paso_b, self.paso_c)):
+            if i:
+                gpipe.addWidget(SeparadorPaso())
+            gpipe.addWidget(paso)
 
-        self.btn_run_all     = QPushButton("▶ Ejecutar todo")
+        gpipe.addSpacing(theme.SPACE_2)
+        self.btn_run_all = QPushButton("▶  Ejecutar todo")
         self.btn_run_all.setEnabled(False)
-        self.btn_run_all.setStyleSheet(
-            "background-color: #2a4a6a; border-color: #4a7aaa;"
-        )
+        self.btn_run_all.setProperty("primary", "true")
+        self.btn_run_all.setToolTip(_tt(
+            "Ejecuta A, B y C en cadena con la configuración actual."))
         gpipe.addWidget(self.btn_run_all)
 
         lay.addWidget(g_pipe)
 
-        g_view = QGroupBox("Visualización")
-        gview  = QVBoxLayout(g_view)
-
-        self.btn_show_pcd  = QPushButton("👁 Ver nube limpia")
-        self.btn_show_pcd.setEnabled(False)
-        gview.addWidget(self.btn_show_pcd)
-
-        self.btn_show_mesh = QPushButton("👁 Ver malla reconstruida")
-        self.btn_show_mesh.setEnabled(False)
-        gview.addWidget(self.btn_show_mesh)
-
-        self.btn_show_solid = QPushButton("👁 Ver sólido")
-        self.btn_show_solid.setEnabled(False)
-        gview.addWidget(self.btn_show_solid)
-
-        self.chk_rgb = QCheckBox("Color RGB de la nube")
-        self.chk_rgb.setChecked(True)
-        self.chk_rgb.setToolTip(_tt(
-            "Muestra la nube con los colores RGB del archivo (si los "
-            "tiene) o con un color uniforme. El color uniforme ayuda a "
-            "evaluar la geometría sin la distracción de la textura."))
-        gview.addWidget(self.chk_rgb)
-
-        lay.addWidget(g_view)
-
-        g_edit = QGroupBox("Edición")
-        gedit  = QVBoxLayout(g_edit)
-
-        self.btn_undo = QPushButton("↩ Deshacer (Ctrl+Z)")
-        self.btn_undo.setEnabled(False)
-        gedit.addWidget(self.btn_undo)
-
-        lay.addWidget(g_edit)
-
-        # ── Productos del pipeline ──────────────────────────────────────
-        # Una etiqueta por producto: antes la malla y el sólido compartían
-        # una sola, así que al terminar C se perdía de vista el resultado
-        # de B sin forma de recuperarlo salvo re-ejecutando.
-        g_info = QGroupBox("Productos")
-        ginf   = QVBoxLayout(g_info)
-
-        self.lbl_pcd_info  = QLabel("Nube: —")
-        self.lbl_pcd_info.setWordWrap(True)
-        ginf.addWidget(self.lbl_pcd_info)
-
-        self.lbl_mesh_info = QLabel("Malla: —")
-        self.lbl_mesh_info.setWordWrap(True)
-        ginf.addWidget(self.lbl_mesh_info)
-
-        self.lbl_solid_info = QLabel("Sólido: —")
-        self.lbl_solid_info.setWordWrap(True)
-        ginf.addWidget(self.lbl_solid_info)
-
-        lay.addWidget(g_info)
-
         # ── Panel de calidad del sólido ─────────────────────────────────
-        # La cascada de solidificación ya calculaba todo esto; hasta ahora
-        # solo llegaba al log, donde se pierde entre el resto de mensajes.
+        # La cascada de solidificación ya calculaba todo esto; hasta la
+        # Fase 1 solo llegaba al log, donde se pierde entre el resto.
         g_qual = QGroupBox("Calidad del sólido")
         gq     = QVBoxLayout(g_qual)
-        gq.setSpacing(3)
+        gq.setSpacing(theme.SPACE_1)
 
         self.lbl_q_strategy  = QLabel("Estrategia: —")
         self.lbl_q_fidelity  = QLabel("Fidelidad: —")
@@ -1837,19 +1824,21 @@ class MainWindow(QMainWindow):
             lbl.setWordWrap(True)
             gq.addWidget(lbl)
 
+        gq.addSpacing(theme.SPACE_2)
         sep = QFrame()
         sep.setFrameShape(QFrame.HLine)
-        sep.setStyleSheet("color: #3a3a44;")
+        sep.setStyleSheet(theme.separator_style())
         gq.addWidget(sep)
 
         cascada_hdr = QLabel("Cascada de estrategias")
-        cascada_hdr.setStyleSheet("color: #82b4d0; font-size: 10px;")
+        cascada_hdr.setStyleSheet(
+            theme.label_style(theme.INFO, theme.FONT_SM, bold=True))
         gq.addWidget(cascada_hdr)
 
         self.lbl_q_cascade = QLabel("—")
         self.lbl_q_cascade.setWordWrap(True)
         self.lbl_q_cascade.setStyleSheet(
-            "font-family: monospace; font-size: 10px; color: #9ab0c0;")
+            theme.label_style(theme.TEXT_MUTED, theme.FONT_SM, mono=True))
         gq.addWidget(self.lbl_q_cascade)
 
         g_qual.setToolTip(_tt(
@@ -1864,9 +1853,23 @@ class MainWindow(QMainWindow):
             "ganó."))
 
         lay.addWidget(g_qual)
+
+        # ── Opciones del visor ──────────────────────────────────────────
+        g_vis = QGroupBox("Visor")
+        gvis  = QVBoxLayout(g_vis)
+
+        self.chk_rgb = QCheckBox("Color RGB de la nube")
+        self.chk_rgb.setChecked(True)
+        self.chk_rgb.setToolTip(_tt(
+            "Muestra la nube con los colores RGB del archivo (si los "
+            "tiene) o con un color uniforme. El color uniforme ayuda a "
+            "evaluar la geometría sin la distracción de la textura."))
+        gvis.addWidget(self.chk_rgb)
+
+        lay.addWidget(g_vis)
         lay.addStretch()
 
-        return w
+        return contenedor
 
     # ══════════════════════════════════════════════════════════════
     #  BARRA DE EDICIÓN  (adosada al borde superior del visor 3D)
@@ -1945,8 +1948,9 @@ class MainWindow(QMainWindow):
             "modelo al cargar."))
         tb.addWidget(self.step_move)
 
-        tb.addWidget(QLabel(" ∠°: "))
+        tb.addWidget(QLabel(" Ángulo: "))
         self.step_rot = QDoubleSpinBox()
+        self.step_rot.setSuffix("°")
         self.step_rot.setRange(0.1, 180.0)
         self.step_rot.setDecimals(1)
         self.step_rot.setValue(15.0)
@@ -1956,13 +1960,14 @@ class MainWindow(QMainWindow):
             "del modelo."))
         tb.addWidget(self.step_rot)
 
-        tb.addWidget(QLabel(" ×: "))
+        tb.addWidget(QLabel(" Factor: "))
         self.step_scale = QDoubleSpinBox()
         self.step_scale.setRange(1.01, 10.0)
         self.step_scale.setDecimals(2)
         self.step_scale.setSingleStep(0.05)
         self.step_scale.setValue(1.10)
-        self.step_scale.setMaximumWidth(70)
+        self.step_scale.setPrefix("×")
+        self.step_scale.setMaximumWidth(80)
         self.step_scale.setToolTip(_tt(
             "Factor de la escala paramétrica: «+» multiplica, «−» divide. "
             "Útil también para convertir unidades (p. ej. factor 10)."))
@@ -1985,11 +1990,16 @@ class MainWindow(QMainWindow):
 
         tb.addSeparator()
 
-        a_undo = QAction("↩ Deshacer", self)
-        a_undo.setToolTip(_tt("Deshace la última transformación aplicada "
-                              "(cursor o paramétrica)."))
-        a_undo.triggered.connect(self._undo_transform)
-        tb.addAction(a_undo)
+        # Etiqueta explícita: antes decía solo «Deshacer», igual que la del
+        # menú y la del panel, pero deshace algo distinto (la transformación,
+        # no el paso del pipeline).
+        a_undo_t = QAction("↩ Deshacer transformación", self)
+        a_undo_t.setToolTip(_tt(
+            "Revierte el último movimiento, giro o escalado. No afecta a los "
+            "resultados del pipeline: para eso está «Deshacer el último "
+            "paso» (Ctrl+Z)."))
+        a_undo_t.triggered.connect(self._undo_transform)
+        tb.addAction(a_undo_t)
 
         return tb
 
@@ -2213,10 +2223,27 @@ class MainWindow(QMainWindow):
 
         m_edit = mb.addMenu("Edición")
 
-        a_undo = QAction("Deshacer", self)
-        a_undo.setShortcut("Ctrl+Z")
-        a_undo.triggered.connect(self._undo)
-        m_edit.addAction(a_undo)
+        # Dos «deshacer» distintos que antes compartían etiqueta: uno revierte
+        # el estado del pipeline y otro solo la última transformación
+        # geométrica. Con el mismo texto en cuatro sitios era imposible saber
+        # cuál se estaba pulsando.
+        self.act_undo = QAction("Deshacer el último paso", self)
+        self.act_undo.setShortcut("Ctrl+Z")
+        self.act_undo.setEnabled(False)
+        self.act_undo.setToolTip(_tt(
+            "Devuelve la nube, la malla y el sólido al estado anterior a la "
+            "última ejecución del pipeline."))
+        self.act_undo.triggered.connect(self._undo)
+        m_edit.addAction(self.act_undo)
+
+        self.act_undo_transform = QAction("Deshacer la última transformación",
+                                          self)
+        self.act_undo_transform.setShortcut("Ctrl+Shift+Z")
+        self.act_undo_transform.setToolTip(_tt(
+            "Revierte el último movimiento, giro o escalado aplicado con la "
+            "barra de edición. No afecta a los resultados del pipeline."))
+        self.act_undo_transform.triggered.connect(self._undo_transform)
+        m_edit.addAction(self.act_undo_transform)
 
         m_pipe = mb.addMenu("Pipeline")
 
@@ -2267,43 +2294,61 @@ class MainWindow(QMainWindow):
         m_view.addAction(a_editbar)
 
     # ══════════════════════════════════════════════════════════════
-    #  TOOLBAR  (sin cambios)
+    #  TOOLBAR
     # ══════════════════════════════════════════════════════════════
 
     def _build_toolbar(self):
+        """
+        Barra principal: solo acciones globales de archivo y edición.
+
+        Los botones del pipeline (A/B/C/Todo) y de visualización ya no están
+        aquí: viven en los pasos del panel derecho, donde además muestran su
+        estado. Antes cada uno existía en la barra, en el menú y en el panel
+        a la vez.
+        """
         tb = QToolBar("Principal")
         tb.setMovable(False)
         self.addToolBar(tb)
 
-        tb.addAction("📂 Cargar",   self._load_point_cloud)
-        tb.addAction("💾 Exportar", self._export_mesh)
+        self.act_load = QAction("📂  Cargar nube", self)
+        self.act_load.setShortcut("Ctrl+O")
+        self.act_load.setToolTip(_tt(
+            "Abre una nube de puntos (.ply, .pcd, .xyz, .txt, .las, .laz, "
+            ".e57) para iniciar el pipeline."))
+        self.act_load.triggered.connect(self._load_point_cloud)
+        tb.addAction(self.act_load)
+
+        # Exportar como desplegable: hay cuatro cosas exportables y elegir
+        # entre ellas es parte de la acción, no un paso aparte.
+        self.btn_export = QToolButton()
+        self.btn_export.setText("💾  Exportar")
+        self.btn_export.setPopupMode(QToolButton.InstantPopup)
+        self.btn_export.setEnabled(False)
+        self.btn_export.setToolTip(_tt(
+            "Guarda en disco cualquiera de los productos del pipeline, o el "
+            "reporte de la sesión."))
+        menu_export = QMenu(self.btn_export)
+        menu_export.addAction(self.act_export_cloud)
+        menu_export.addAction(self.act_export_mesh)
+        menu_export.addAction(self.act_export_solid)
+        menu_export.addSeparator()
+        menu_export.addAction(self.act_export_report)
+        self.btn_export.setMenu(menu_export)
+        tb.addWidget(self.btn_export)
+
         tb.addSeparator()
-        tb.addAction("A · Pre",    self._run_preprocess)
-        tb.addAction("B · Rec",    self._run_reconstruct)
-        tb.addAction("C · Sol",    self._run_solidify)
-        tb.addAction("▶ Todo",     self._run_all)
-        tb.addSeparator()
-        tb.addAction("↩ Undo",     self._undo)
+        tb.addAction(self.act_undo)
 
     # ══════════════════════════════════════════════════════════════
     #  CONEXIÓN DE SEÑALES  (sin cambios)
     # ══════════════════════════════════════════════════════════════
 
     def _connect_signals(self):
-        self.btn_load.clicked.connect(self._load_point_cloud)
-        self.btn_export.clicked.connect(self._export_mesh)
-
-        self.btn_preprocess.clicked.connect(self._run_preprocess)
-        self.btn_reconstruct.clicked.connect(self._run_reconstruct)
-        self.btn_solidify.clicked.connect(self._run_solidify)
+        # Los pasos del pipeline conectan sus propias señales al construirse
+        # (ver _build_right_panel); aquí solo queda lo que no pertenece a
+        # ningún paso concreto.
         self.btn_run_all.clicked.connect(self._run_all)
-
-        self.btn_show_pcd.clicked.connect(self._show_clean_pcd)
-        self.btn_show_mesh.clicked.connect(self._show_recon_mesh)
-        self.btn_show_solid.clicked.connect(self._show_solid_mesh)
         self.chk_rgb.toggled.connect(self._on_rgb_toggled)
-
-        self.btn_undo.clicked.connect(self._undo)
 
         # Señales del visor (edición interactiva y medición)
         self.viewport.transform_committed.connect(self._on_drag_transform)
@@ -2353,8 +2398,7 @@ class MainWindow(QMainWindow):
             # otro dataset y mezclarlas en el reporte sería engañoso.
             self._source_path = path
             self._runs.clear()
-            self.lbl_mesh_info.setText("Malla: —")
-            self.lbl_solid_info.setText("Sólido: —")
+            self.act_export_report.setEnabled(False)
             self._reset_quality_panel()
 
             # Paso de movimiento proporcional al tamaño del modelo
@@ -2366,24 +2410,27 @@ class MainWindow(QMainWindow):
                 self.step_move.setValue(round(diag * 0.05, 4))
 
             self.viewport.show_point_cloud(pcd)
+            self._mostrar_estado_vacio(False)
             self._update_info_labels()
 
             n = len(pcd.points)
             self._log(
-                f"  ✓ {n:,} puntos cargados desde "
+                f"  ✓ {fmt.entero(n)} puntos cargados desde "
                 f"{os.path.basename(path)}"
             )
-            self._status(f"Nube cargada: {n:,} puntos")
-
-            self.btn_preprocess.setEnabled(True)
-            self.btn_run_all.setEnabled(True)
-            self.btn_export.setEnabled(True)
-            self.act_export_cloud.setEnabled(True)
-            self.act_export_mesh.setEnabled(False)
-            self.act_export_solid.setEnabled(False)
+            self._status(
+                f"{os.path.basename(path)} — {fmt.entero(n)} puntos. "
+                f"Ya puedes ejecutar el paso A.")
 
         except Exception as e:
-            self._show_error(f"Error al cargar archivo:\n{e}")
+            self._show_error(
+                "No se pudo abrir la nube de puntos",
+                f"El archivo «{os.path.basename(path)}» no se pudo leer.\n\n"
+                f"Comprueba que no esté dañado y que su formato sea uno de "
+                f"los admitidos. Si es un .las o .laz, hace falta tener "
+                f"instalado laspy.",
+                detalle=f"{type(e).__name__}: {e}",
+            )
 
     def _ask_save_path(self, titulo: str, formatos: str) -> str | None:
         """Diálogo de guardado; asegura la extensión del filtro elegido."""
@@ -2410,9 +2457,16 @@ class MainWindow(QMainWindow):
                 raise RuntimeError("Open3D no pudo escribir el archivo")
             self._log(f"  ✓ Nube {origen} exportada: "
                       f"{os.path.basename(path)}")
-            self._status(f"Exportada: {os.path.basename(path)}")
+            self._status(f"Nube guardada en {os.path.basename(path)}")
         except Exception as e:
-            self._show_error(f"Error al exportar:\n{e}")
+            self._show_error(
+                "No se pudo guardar la nube",
+                f"No se pudo escribir «{os.path.basename(path)}».\n\n"
+                f"Comprueba que la carpeta existe, que tienes permiso de "
+                f"escritura y que el archivo no está abierto en otro "
+                f"programa.",
+                detalle=f"{type(e).__name__}: {e}",
+            )
 
     def _export_recon_mesh(self):
         self._export_mesh_product(self.recon_mesh, "malla reconstruida")
@@ -2444,14 +2498,18 @@ class MainWindow(QMainWindow):
             # test de auto-intersecciones cuadrático que congela la GUI en
             # mallas cerradas grandes.
             if not MeshSolidifier.is_topologically_closed(mesh):
-                reply = QMessageBox.question(
-                    self,
-                    "Malla no watertight",
-                    f"La {nombre} no es watertight.\n"
-                    "¿Exportar de todas formas?",
-                    QMessageBox.Yes | QMessageBox.No,
-                )
-                if reply != QMessageBox.Yes:
+                box = QMessageBox(self)
+                box.setIcon(QMessageBox.Question)
+                box.setWindowTitle("Point Cloud Processor")
+                box.setText(f"La {nombre} no está cerrada")
+                box.setInformativeText(
+                    "Tiene bordes abiertos, así que no encierra un volumen. "
+                    "Sirve para visualizar, pero no para imprimir en 3D ni "
+                    "para calcular volúmenes.\n\n"
+                    "¿Guardarla igualmente?")
+                box.setStandardButtons(QMessageBox.Save | QMessageBox.Cancel)
+                box.setDefaultButton(QMessageBox.Save)
+                if box.exec_() != QMessageBox.Save:
                     return
 
             # STL exige normales de triángulo calculadas
@@ -2459,12 +2517,22 @@ class MainWindow(QMainWindow):
                 mesh.compute_triangle_normals()
 
             if not o3d.io.write_triangle_mesh(path, mesh):
-                raise RuntimeError("Open3D no pudo escribir el archivo")
+                raise RuntimeError(
+                    "Open3D devolvió un fallo al escribir el archivo")
             self._log(f"  ✓ Exportada ({nombre}): {os.path.basename(path)}")
-            self._status(f"Exportada: {os.path.basename(path)}")
+            self._status(
+                f"{nombre.capitalize()} guardada en "
+                f"{os.path.basename(path)}")
 
         except Exception as e:
-            self._show_error(f"Error al exportar:\n{e}")
+            self._show_error(
+                f"No se pudo guardar la {nombre}",
+                f"No se pudo escribir «{os.path.basename(path)}».\n\n"
+                f"Comprueba que la carpeta existe, que tienes permiso de "
+                f"escritura y que el archivo no está abierto en otro "
+                f"programa.",
+                detalle=f"{type(e).__name__}: {e}",
+            )
 
     # ══════════════════════════════════════════════════════════════
     #  REPORTE DE SESIÓN
@@ -2599,9 +2667,10 @@ class MainWindow(QMainWindow):
         """Exporta la bitácora de la sesión a JSON o Markdown."""
         if not self._runs:
             self._show_error(
-                "Todavía no hay nada que reportar.\n\n"
-                "Ejecuta al menos un bloque del pipeline (A, B o C) y "
-                "vuelve a intentarlo."
+                "Todavía no hay nada que reportar",
+                "El reporte recoge los parámetros, las métricas y los "
+                "tiempos de cada paso que se haya ejecutado. Ejecuta al "
+                "menos uno (A, B o C) y vuelve a intentarlo."
             )
             return
 
@@ -2636,9 +2705,12 @@ class MainWindow(QMainWindow):
 
         except OSError as e:
             self._show_error(
-                f"No se pudo guardar el reporte en:\n{path}\n\n"
-                f"Comprueba que la carpeta existe y que tienes permiso "
-                f"de escritura.\n\nDetalle: {e}"
+                "No se pudo guardar el reporte",
+                f"No se pudo escribir «{os.path.basename(path)}».\n\n"
+                f"Comprueba que la carpeta existe, que tienes permiso de "
+                f"escritura y que el archivo no está abierto en otro "
+                f"programa.",
+                detalle=f"{type(e).__name__}: {e}",
             )
 
     # ══════════════════════════════════════════════════════════════
@@ -2789,7 +2861,8 @@ class MainWindow(QMainWindow):
 
         self.progress_bar.setVisible(True)
         self.progress_bar.setValue(0)
-        self._set_pipeline_buttons(False)
+        self._running_block = block
+        self._refresh_pipeline_state()
 
         self._worker.start()
 
@@ -2814,52 +2887,68 @@ class MainWindow(QMainWindow):
             self.clean_pcd  = result["point_cloud"]
             self.recon_mesh = None
             self.solid_mesh = None
-            self.btn_show_mesh.setEnabled(False)
-            self.btn_show_solid.setEnabled(False)
-            self.btn_solidify.setEnabled(False)
-            self.act_export_mesh.setEnabled(False)
-            self.act_export_solid.setEnabled(False)
-            self.lbl_mesh_info.setText("Malla: —")
-            self.lbl_solid_info.setText("Sólido: —")
+            self.paso_b.limpiar()
+            self.paso_c.limpiar()
             self._reset_quality_panel()
             self._current_view = "clean"
             self.viewport.show_point_cloud(self.clean_pcd)
-            self.btn_show_pcd.setEnabled(True)
-            self.btn_reconstruct.setEnabled(True)
             self._update_pcd_label(result["stats"])
 
         elif block == WorkerThread.BLOCK_RECONSTRUCT:
             # Sobrescribe la malla e invalida el sólido anterior.
             self.recon_mesh = result["mesh"]
             self.solid_mesh = None
-            self.btn_show_solid.setEnabled(False)
-            self.act_export_solid.setEnabled(False)
-            self.lbl_solid_info.setText("Sólido: —")
+            self.paso_c.limpiar()
             self._reset_quality_panel()
             self._current_view = "mesh"
             self.viewport.show_mesh(self.recon_mesh)
-            self.btn_show_mesh.setEnabled(True)
-            self.btn_solidify.setEnabled(True)
-            self.btn_export.setEnabled(True)
-            self.act_export_mesh.setEnabled(True)
             self._update_mesh_label(result["stats"])
 
         elif block == WorkerThread.BLOCK_SOLIDIFY:
             self.solid_mesh = result["mesh"]
             self._current_view = "solid"
             self.viewport.show_mesh(self.solid_mesh)
-            self.btn_show_solid.setEnabled(True)
-            self.btn_export.setEnabled(True)
-            self.act_export_solid.setEnabled(True)
             self._update_solid_label(result["stats"])
+
+        self._refresh_pipeline_state()
+
+    _AYUDA_POR_BLOQUE = {
+        WorkerThread.BLOCK_PREPROCESS:
+            "Suele deberse a una nube demasiado pequeña o con coordenadas "
+            "no válidas. Prueba a desactivar algún filtro del panel A, o "
+            "revisa el archivo de origen.",
+        WorkerThread.BLOCK_RECONSTRUCT:
+            "Suele deberse a parámetros mal escalados para el tamaño del "
+            "objeto, o a normales mal orientadas. Prueba con el método "
+            "Poisson y con el modo Básico, que usa la configuración "
+            "validada.",
+        WorkerThread.BLOCK_SOLIDIFY:
+            "Suele deberse a una malla de entrada muy fragmentada. Revisa "
+            "el resultado del paso B, y considera subir la tolerancia de "
+            "fidelidad para que la cascada pueda aceptar un respaldo.",
+    }
 
     def _on_error(self, msg: str):
         self._log(f"  ❌ ERROR: {msg}")
-        self._show_error(msg)
+        # El traceback va al registro y al detalle plegable, no al cuerpo
+        # del diálogo: al usuario le sirve saber qué hacer, no la pila.
+        paso = {
+            WorkerThread.BLOCK_PREPROCESS : "A · Preprocesamiento",
+            WorkerThread.BLOCK_RECONSTRUCT: "B · Reconstrucción",
+            WorkerThread.BLOCK_SOLIDIFY   : "C · Solidificación",
+        }.get(self._running_block, "el pipeline")
+        self._show_error(
+            f"Falló {paso}",
+            self._AYUDA_POR_BLOQUE.get(
+                self._running_block,
+                "Revisa el registro para ver en qué punto se interrumpió."),
+            detalle=msg,
+        )
 
     def _on_worker_finished(self):
         self.progress_bar.setVisible(False)
-        self._set_pipeline_buttons(True)
+        self._running_block = None
+        self._refresh_pipeline_state()
 
         # No soltar la referencia al worker aquí: el hilo puede seguir en
         # su limpieza interna. Se libera en el próximo _start_worker
@@ -2882,14 +2971,63 @@ class MainWindow(QMainWindow):
             self._worker.wait()
         super().closeEvent(event)
 
-    def _set_pipeline_buttons(self, enabled: bool):
-        if self.raw_pcd is not None:
-            self.btn_preprocess.setEnabled(enabled)
-            self.btn_run_all.setEnabled(enabled)
-        if self.clean_pcd is not None or self.raw_pcd is not None:
-            self.btn_reconstruct.setEnabled(enabled)
-        if self.recon_mesh is not None:
-            self.btn_solidify.setEnabled(enabled)
+    def _refresh_pipeline_state(self):
+        """
+        Deriva el estado de toda la interfaz a partir de los datos que hay.
+
+        Antes cada handler encendía y apagaba botones a mano, repartido en
+        una docena de sitios, y era fácil que un camino dejara la interfaz
+        incoherente. Aquí el estado se calcula una sola vez desde la única
+        fuente de verdad: qué productos existen y si hay algo en curso.
+        """
+        ocupado = self._worker is not None and self._worker.isRunning()
+
+        existe = {
+            "a": self.clean_pcd  is not None,
+            "b": self.recon_mesh is not None,
+            "c": self.solid_mesh is not None,
+        }
+        # B puede correr sobre la nube cruda si aún no se ha preprocesado.
+        habilitado = {
+            "a": self.raw_pcd    is not None,
+            "b": self.clean_pcd is not None or self.raw_pcd is not None,
+            "c": self.recon_mesh is not None,
+        }
+        bloque_a_paso = {
+            WorkerThread.BLOCK_PREPROCESS : "a",
+            WorkerThread.BLOCK_RECONSTRUCT: "b",
+            WorkerThread.BLOCK_SOLIDIFY   : "c",
+        }
+        en_curso = bloque_a_paso.get(self._running_block)
+
+        for clave, paso in (("a", self.paso_a),
+                            ("b", self.paso_b),
+                            ("c", self.paso_c)):
+            if en_curso == clave:
+                paso.set_estado("corriendo")
+            elif existe[clave]:
+                paso.set_estado("hecho")
+            elif habilitado[clave]:
+                paso.set_estado("listo")
+            else:
+                paso.set_estado("pendiente")
+
+            # Nada se puede lanzar mientras haya una operación en marcha.
+            if ocupado:
+                paso.btn_ejecutar.setEnabled(False)
+
+        self.btn_run_all.setEnabled(self.raw_pcd is not None and not ocupado)
+
+        # Exportación: cada producto se puede guardar en cuanto existe.
+        self.act_export_cloud.setEnabled(self.raw_pcd is not None)
+        self.act_export_mesh.setEnabled(existe["b"])
+        self.act_export_solid.setEnabled(existe["c"])
+        self.btn_export.setEnabled(self.raw_pcd is not None)
+
+        self.act_undo.setEnabled(self._undo_stack is not None and not ocupado)
+
+        # La barra de edición no tiene sentido sin nada que editar.
+        self.edit_toolbar.setEnabled(self.raw_pcd is not None)
 
     # ══════════════════════════════════════════════════════════════
     #  UNDO  (sin cambios)
@@ -2901,7 +3039,7 @@ class MainWindow(QMainWindow):
             "recon_mesh" : deepcopy(self.recon_mesh) if self.recon_mesh else None,
             "solid_mesh" : deepcopy(self.solid_mesh) if self.solid_mesh else None,
         }
-        self.btn_undo.setEnabled(True)
+        self.act_undo.setEnabled(True)
 
     def _undo(self):
         if self._undo_stack is None:
@@ -2912,7 +3050,6 @@ class MainWindow(QMainWindow):
         self.recon_mesh = self._undo_stack["recon_mesh"]
         self.solid_mesh = self._undo_stack["solid_mesh"]
         self._undo_stack = None
-        self.btn_undo.setEnabled(False)
 
         if self.solid_mesh:
             self.viewport.show_mesh(self.solid_mesh)
@@ -2921,59 +3058,98 @@ class MainWindow(QMainWindow):
         elif self.clean_pcd:
             self.viewport.show_point_cloud(self.clean_pcd)
 
+        # El sólido restaurado ya no lleva sus métricas de calidad: las
+        # stats pertenecían a la ejecución que se acaba de deshacer.
+        self._reset_quality_panel()
         self._update_info_labels()
         self._log("  ↩ Deshacer aplicado")
-        self._status("Estado anterior restaurado")
+        self._status("Se restauró el estado anterior del pipeline")
 
     # ══════════════════════════════════════════════════════════════
-    #  ETIQUETAS DE INFORMACIÓN  (sin cambios)
+    #  RESÚMENES DE LOS PASOS
     # ══════════════════════════════════════════════════════════════
 
     def _update_info_labels(self):
-        if self.raw_pcd:
-            n = len(self.raw_pcd.points)
-            self.lbl_pcd_info.setText(f"Nube orig: {n:,} pts")
+        """Reconstruye los resúmenes de los tres pasos desde los productos
+        que hay ahora mismo (se usa tras deshacer, cuando no hay stats)."""
+        if self.clean_pcd is not None:
+            self.paso_a.set_resumen(
+                f"{fmt.entero(len(self.clean_pcd.points))} puntos")
+        else:
+            self.paso_a.limpiar()
+
+        if self.recon_mesh is not None:
+            self.paso_b.set_resumen(fmt.vert_tri(
+                len(self.recon_mesh.vertices),
+                len(self.recon_mesh.triangles)))
+        else:
+            self.paso_b.limpiar()
+
+        if self.solid_mesh is not None:
+            self.paso_c.set_resumen(fmt.vert_tri(
+                len(self.solid_mesh.vertices),
+                len(self.solid_mesh.triangles)))
+        else:
+            self.paso_c.limpiar()
+
+        self._refresh_pipeline_state()
 
     def _update_pcd_label(self, stats: dict):
-        self.lbl_pcd_info.setText(
-            f"Nube: {stats['final_points']:,} pts\n"
-            f"(orig: {stats['original_points']:,})"
+        self.paso_a.set_resumen(
+            f"{fmt.entero(stats['final_points'])} puntos  ·  "
+            f"{fmt.entero(stats['total_removed'])} descartados"
         )
 
     def _update_mesh_label(self, stats: dict):
-        wt = stats.get("is_closed")
-        cierre = "—" if wt is None else ("cerrada" if wt else "abierta")
-        self.lbl_mesh_info.setText(
-            f"Malla: {stats['final_vertices']:,}v "
-            f"{stats['final_triangles']:,}t\n"
-            f"[{stats['method']}, {cierre}]"
+        cerrada = stats.get("is_closed")
+        estado  = ("" if cerrada is None
+                   else ("  ·  cerrada" if cerrada else "  ·  con bordes"))
+        metodo  = self._METODO_NOMBRE.get(stats["method"], stats["method"])
+        self.paso_b.set_resumen(
+            f"{fmt.vert_tri(stats['final_vertices'], stats['final_triangles'])}"
+            f"\n{metodo}{estado}"
         )
 
     def _update_solid_label(self, stats: dict):
-        self.lbl_solid_info.setText(
-            f"Sólido: {stats['output_vertices']:,}v "
-            f"{stats['output_triangles']:,}t"
-        )
+        self.paso_c.set_resumen(fmt.vert_tri(
+            stats["output_vertices"], stats["output_triangles"]))
         self._update_quality_panel(stats)
 
     # ══════════════════════════════════════════════════════════════
     #  PANEL DE CALIDAD
     # ══════════════════════════════════════════════════════════════
 
-    _OK    = "#8fd08f"
-    _WARN  = "#d0b070"
-    _BAD   = "#d08080"
-    _MUTED = "#9ab0c0"
+    # Nombres legibles: en la interfaz no tiene por qué aparecer el
+    # identificador interno que usan los módulos de core/.
+    _ESTRATEGIA_NOMBRE = {
+        "repair"      : "reparación",
+        "poisson"     : "envolvente Poisson",
+        "voxel"       : "voxelización",
+        "hull"        : "envolvente convexa",
+        "passthrough" : "ninguna",
+    }
+    _ESTRATEGIA_CORTA = {
+        "repair"      : "reparación",
+        "poisson"     : "Poisson",
+        "voxel"       : "voxelización",
+        "hull"        : "convexa",
+        "passthrough" : "ninguna",
+    }
+    _METODO_NOMBRE = {
+        "poisson"       : "Poisson",
+        "ball_pivoting" : "Ball Pivoting",
+        "alpha_shape"   : "Alpha Shape",
+    }
 
     def _update_quality_panel(self, stats: dict):
         """
         Vuelca en el panel el resultado del control de calidad de la
-        cascada. Todo esto ya lo calculaba `MeshSolidifier`; hasta ahora
+        cascada. Todo esto ya lo calculaba `MeshSolidifier`; hasta la Fase 1
         solo se podía leer en el log.
         """
         def pintar(lbl, texto, color):
             lbl.setText(texto)
-            lbl.setStyleSheet(f"color: {color};")
+            lbl.setStyleSheet(theme.label_style(color, theme.FONT_MD))
 
         # ── Estrategia ganadora ─────────────────────────────────────────
         estrategia = stats.get("strategy_used", "—")
@@ -2981,47 +3157,51 @@ class MainWindow(QMainWindow):
         # devolvió la malla de entrada tal cual: no hay sólido de verdad.
         # 'hull' cierra siempre, pero destruyendo las concavidades.
         color_est = {
-            "repair"      : self._OK,
-            "poisson"     : self._OK,
-            "voxel"       : self._WARN,
-            "hull"        : self._BAD,
-            "passthrough" : self._BAD,
-        }.get(estrategia, self._MUTED)
-        pintar(self.lbl_q_strategy, f"Estrategia: {estrategia}", color_est)
+            "repair"      : theme.OK,
+            "poisson"     : theme.OK,
+            "voxel"       : theme.WARN,
+            "hull"        : theme.ERROR,
+            "passthrough" : theme.ERROR,
+        }.get(estrategia, theme.TEXT_MUTED)
+        legible = self._ESTRATEGIA_NOMBRE.get(estrategia, estrategia)
+        pintar(self.lbl_q_strategy, f"Estrategia: {legible}", color_est)
 
         # ── Error de fidelidad ──────────────────────────────────────────
         fid = stats.get("fidelity_error")
         if fid is None:
             pintar(self.lbl_q_fidelity,
-                   "Fidelidad: no medida", self._MUTED)
+                   "Fidelidad: sin medir", theme.TEXT_MUTED)
         else:
             tol = self.param_panel.sol_fidelity_max.value() / 100.0
-            color = self._OK if fid <= tol else self._BAD
+            color = theme.OK if fid <= tol else theme.ERROR
             pintar(self.lbl_q_fidelity,
-                   f"Fidelidad: {fid:.4%}  (tol. {tol:.2%})", color)
+                   f"Fidelidad: {fmt.porcentaje(fid, 3)}"
+                   f"  (tolerancia {fmt.porcentaje(tol, 1)})", color)
 
         # ── Cierre topológico ───────────────────────────────────────────
         cerrado    = bool(stats.get("is_watertight"))
         orientable = bool(stats.get("is_orientable"))
         pintar(self.lbl_q_closed,
-               f"Cerrado: {'✓ sí' if cerrado else '✗ no'}   "
-               f"Orientable: {'✓' if orientable else '✗'}",
-               self._OK if cerrado else self._BAD)
+               f"Cerrado: {'✓ sí' if cerrado else '✗ no'}    "
+               f"Orientable: {'✓ sí' if orientable else '✗ no'}",
+               theme.OK if cerrado else theme.ERROR)
 
         # ── Volumen ─────────────────────────────────────────────────────
         vol = stats.get("volume")
         if vol is None:
             pintar(self.lbl_q_volume,
-                   "Volumen: n/d (malla abierta)", self._MUTED)
+                   "Volumen: no aplica (malla abierta)", theme.TEXT_MUTED)
         else:
-            pintar(self.lbl_q_volume, f"Volumen: {vol:.6g}", self._MUTED)
+            pintar(self.lbl_q_volume,
+                   f"Volumen: {fmt.significativo(vol)}", theme.TEXT_MUTED)
 
         # ── Agujeros de la malla de entrada ─────────────────────────────
         holes = stats.get("holes_found")
         pintar(self.lbl_q_holes,
-               f"Agujeros entrada: "
-               f"{'—' if holes is None else f'{holes:,} aristas'}",
-               self._MUTED)
+               "Agujeros de entrada: " +
+               ("—" if holes is None
+                else f"{fmt.entero(holes)} aristas"),
+               theme.TEXT_MUTED)
 
         # ── Cascada de estrategias probadas ─────────────────────────────
         tried = stats.get("strategies_tried") or {}
@@ -3033,10 +3213,11 @@ class MainWindow(QMainWindow):
         lineas = []
         for nombre, r in tried.items():
             err = r.get("fidelity_error")
-            err_txt = "—" if err is None else f"{err:.3%}"
-            marca = "✓" if nombre == estrategia else " "
-            cierra = "cerr" if r.get("watertight") else "abre"
-            lineas.append(f"{marca} {nombre:<8} {cierra}  {err_txt}")
+            err_txt = "—" if err is None else fmt.porcentaje(err, 2)
+            marca = "✓" if nombre == estrategia else "·"
+            corto = self._ESTRATEGIA_CORTA.get(nombre, nombre)
+            cierra = "cierra" if r.get("watertight") else "abierta"
+            lineas.append(f"{marca} {corto:<13}{cierra:<9}{err_txt}")
 
         self.lbl_q_cascade.setText("\n".join(lineas))
         self.lbl_q_cascade.setToolTip(_tt(
@@ -3051,13 +3232,15 @@ class MainWindow(QMainWindow):
             (self.lbl_q_fidelity, "Fidelidad: —"),
             (self.lbl_q_closed,   "Cerrado: —"),
             (self.lbl_q_volume,   "Volumen: —"),
-            (self.lbl_q_holes,    "Agujeros entrada: —"),
-            (self.lbl_q_cascade,  "—"),
+            (self.lbl_q_holes,    "Agujeros de entrada: —"),
         ):
             lbl.setText(texto)
-            lbl.setStyleSheet("")
+            lbl.setStyleSheet(
+                theme.label_style(theme.TEXT_SUBTLE, theme.FONT_MD))
+        self.lbl_q_cascade.setText("—")
+        self.lbl_q_cascade.setToolTip("")
         self.lbl_q_cascade.setStyleSheet(
-            "font-family: monospace; font-size: 10px; color: #9ab0c0;")
+            theme.label_style(theme.TEXT_MUTED, theme.FONT_SM, mono=True))
 
     # ══════════════════════════════════════════════════════════════
     #  UTILIDADES  (sin cambios)
@@ -3071,8 +3254,46 @@ class MainWindow(QMainWindow):
     def _status(self, msg: str):
         self.status_bar.showMessage(msg)
 
-    def _show_error(self, msg: str):
-        QMessageBox.critical(self, "Error", msg)
+    def _show_error(self, titulo: str, mensaje: str = "",
+                    detalle: str | None = None):
+        """
+        Error explicado, no volcado.
+
+        Antes se pasaba la excepción cruda al usuario («Error al exportar:
+        RuntimeError: ...»), que no dice qué hacer. Ahora el diálogo lleva un
+        título que nombra el problema, un cuerpo que dice cómo resolverlo, y
+        el detalle técnico plegado para quien lo necesite.
+        """
+        box = QMessageBox(self)
+        box.setIcon(QMessageBox.Warning)
+        box.setWindowTitle("Point Cloud Processor")
+        box.setText(titulo)
+        if mensaje:
+            box.setInformativeText(mensaje)
+        if detalle:
+            box.setDetailedText(detalle)
+        box.setStandardButtons(QMessageBox.Ok)
+        box.exec_()
+
+    # ══════════════════════════════════════════════════════════════
+    #  ESTADO VACÍO DEL VISOR
+    # ══════════════════════════════════════════════════════════════
+
+    def _mostrar_estado_vacio(self, visible: bool):
+        """Muestra u oculta el mensaje superpuesto al visor."""
+        self.empty_state.setVisible(visible)
+        if visible:
+            self._ajustar_estado_vacio()
+            self.empty_state.raise_()
+
+    def _ajustar_estado_vacio(self):
+        """Mantiene el overlay cubriendo exactamente al visor."""
+        if hasattr(self, "empty_state") and hasattr(self, "viewport_container"):
+            self.empty_state.setGeometry(self.viewport_container.rect())
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._ajustar_estado_vacio()
 
 
 # ══════════════════════════════════════════════════════════════════════════════

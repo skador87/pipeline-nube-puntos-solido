@@ -155,18 +155,34 @@ submuestrear (hoy hay que bajar la densidad).
 
 ### Fase 4 — UX
 
-**4.1 Mensajes de error e interfaz** (`ux-copy`). Hoy hay cosas como
-`"Error al exportar:\n{e}"`, que vuelca la excepción cruda al usuario. Aplica
-también a los ~42 tooltips y a los estados vacíos (`"Malla: —"`).
-**4.2 Crítica de usabilidad de la GUI** (`design-critique`, con capturas).
+**4.1 Mensajes de error e interfaz** (`ux-copy`). ✅
+`_show_error()` pasó de volcar la excepción a un diálogo con título,
+explicación accionable y detalle técnico plegado. Los nombres internos
+(`repair`, `ball_pivoting`, `poisson`) ya no llegan a la interfaz: los combos
+muestran nombres legibles y devuelven la clave por `currentData()`. Las
+etiquetas crípticas de la barra de edición (`∠°`, `×`) ahora son «Ángulo» y
+«Factor» con sufijo/prefijo en el propio campo.
+
+**4.2 Crítica de usabilidad de la GUI** (`design-critique`). ✅
+Ver [`PRIORIZACION_DEUDA_TECNICA.md`](PRIORIZACION_DEUDA_TECNICA.md) §6.
+El hallazgo principal era que **cada acción existía 3 o 4 veces** (menú +
+barra + panel derecho, y «Deshacer» además en la barra de edición, donde
+significaba otra cosa). Resuelto: la barra solo lleva acciones globales de
+archivo, el panel derecho es información, y el menú mantiene todo por
+teclado. Los dos «Deshacer» ahora se llaman distinto.
+
 **4.3 Presets guardables** por tipo de dato (bunny / escaneo propio / S3DIS /
-LiDAR aéreo).
+LiDAR aéreo). ← siguiente candidato de esta fase
 **4.4 Comparación visual antes/después** — superponer nube y sólido, o vista
 dividida.
 **4.5 Controles de visualización** — tamaño de punto (hoy fijo en 2 px, se
 satura con nubes densas tipo S3DIS), wireframe, escala de referencia.
-**4.6 Formalizar el tema oscuro** (`design-system`): hoy son colores
-hardcodeados en `apply_dark_theme()` más `setStyleSheet` sueltos.
+
+**4.6 Formalizar el tema oscuro** (`design-system`). ✅
+Los colores viven en `ui/theme.py` como tokens (superficies, texto, acento,
+semánticos, escala tipográfica, espaciado, radios) y el stylesheet se genera
+desde ahí. `testing/test_ui_tema_formato.py` falla si alguien mete un color
+fuera de los tokens o una combinación que no cumpla WCAG AA.
 
 ### Limpieza menor
 
@@ -180,9 +196,10 @@ hardcodeados en `apply_dark_theme()` más `setStyleSheet` sueltos.
 
 ## 6. Validación
 
-**Antes de dar por buena cualquier modificación, correr estas dos:**
+**Antes de dar por buena cualquier modificación, correr estas tres:**
 
 ```powershell
+& $PY testing\test_ui_tema_formato.py
 & $PY testing\test_regresion_bunny.py
 & $PY testing\test_gui_calidad_reporte.py
 ```

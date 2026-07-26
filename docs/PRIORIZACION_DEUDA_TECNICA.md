@@ -214,3 +214,103 @@ de tesis en que se comparen los tres métodos de reconstrucción, es el único
 
 **Transversal, en cualquier momento:** N4 y la limpieza menor son de esfuerzo
 1 y se pueden hacer junto a cualquier otro cambio que toque esos archivos.
+
+---
+
+## 6. Crítica de usabilidad de la GUI (ítem 4.2)
+
+Realizada sobre renders reales de la interfaz, no sobre el código. Se
+capturan sin pantalla sustituyendo `Viewport3D` por el doble de
+`testing/test_gui_calidad_reporte.py` (ver el script en el historial de la
+sesión); por eso el visor 3D sale negro y no se evalúa.
+
+### 6.1 Hallazgo principal: cada acción existía tres o cuatro veces
+
+| Acción | Menú | Barra sup. | Panel dcho. | Barra edición | Total |
+|---|---|---|---|---|---|
+| Deshacer | ✓ | ✓ | ✓ | ✓ | **4** |
+| Cargar | ✓ | ✓ | ✓ | — | 3 |
+| Exportar | ✓ (×4) | ✓ | ✓ | — | 3 |
+| A / B / C / Todo | ✓ | ✓ | ✓ | — | 3 |
+| Ver nube / malla / sólido | ✓ | — | ✓ | — | 2 |
+
+El panel derecho ocupaba 240 px por toda la altura y sus tres primeros
+grupos no aportaban nada que no estuviera ya en la barra.
+
+Peor que la duplicación era la **ambigüedad**: los cuatro «Deshacer» no
+hacían lo mismo. Tres llamaban a `_undo()` (revierte el estado del pipeline)
+y el de la barra de edición a `_undo_transform()` (revierte solo la última
+transformación geométrica). Mismo texto, efectos distintos.
+
+**Resuelto así:** cada acción tiene ahora el menú (coste de pantalla cero,
+accesible por teclado) más **una** superficie visual. La barra lleva solo
+archivo y edición globales; el panel derecho pasa a ser información.
+
+### 6.2 El pipeline no se veía como una secuencia
+
+A→B→C es el modelo mental de toda la aplicación y se representaba con tres
+botones grises idénticos apilados, sin indicación de orden, de posición
+actual ni de qué etapa había corrido ya.
+
+**Resuelto así:** los grupos «Pipeline», «Visualización», «Productos» y
+«Edición» se fusionan en un único componente (`ui/widgets.py:PasoPipeline`)
+donde cada etapa muestra su estado (pendiente / listo / corriendo / hecho),
+el resumen de lo que produjo, y sus acciones de ejecutar y ver. El estado se
+comunica con símbolo **y** color, nunca solo con color.
+
+### 6.3 Estado vacío mudo
+
+En el primer arranque, el elemento más grande de la pantalla era un
+rectángulo negro de ~850×640 px sin ningún mensaje. La única indicación de
+qué hacer estaba a 11 px en la esquina inferior izquierda.
+
+**Resuelto así:** un overlay sobre el visor explica qué formatos se admiten y
+cuál es el siguiente paso. Se superpone en vez de sustituir al visor, porque
+ocultar el widget OpenGL puede hacer que el driver destruya su contexto (ver
+sección 4 del documento de estado).
+
+### 6.4 Contexto irrelevante en el modo Avanzado
+
+Con `método = Poisson` (el valor por defecto), **7 de las 9 filas** del grupo
+de reconstrucción eran parámetros de Ball Pivoting y Alpha Shape, que no se
+aplicaban a nada. En Suavizado se veían a la vez los parámetros de Taubin y
+los de Laplaciano, siendo excluyentes.
+
+**Resuelto así:** cada método tiene su propio grupo y solo se muestra el del
+método activo. La pestaña B·Rec pasó de 9 filas a 5.
+
+### 6.5 La coma significaba dos cosas en la misma pantalla
+
+`Nube: 5,838 pts` usaba la coma como separador de **millares** (herencia del
+`:,` de Python) mientras `Paso: 0,1000` la usaba como separador **decimal**
+(locale español de Qt). En español, «5,838 pts» se lee como cinco coma ocho.
+
+**Resuelto así:** `ui/formato.py` centraliza el formato en convención
+española (millares con punto, decimales con coma) y un test comprueba que
+ninguna salida vuelve a usar coma de millares.
+
+### 6.6 Accesibilidad: el contraste NO era el problema
+
+Contrario a lo esperable en un tema oscuro hecho a mano, se midieron los
+ratios WCAG reales y casi todos pasaban AA. El único par que fallaba era
+**texto blanco sobre el azul de acento: 4.11:1**, por debajo del 4.5
+requerido. Se corrigió oscureciendo el acento a `#356a95` y definiendo una
+rampa de tres estados (base / hover / pulsado) que cumple AA en los tres.
+
+Los estados deshabilitados dan 2.37:1, pero WCAG 1.4.3 exime explícitamente
+los componentes de interfaz inactivos, así que no se tocan.
+
+Se decidió **no** exigir 3:1 al borde en reposo de los controles contra el
+panel: un borde con esa relación en tema oscuro sale casi blanco y convierte
+un formulario denso en una reja. Los controles se identifican por su relleno
+(más claro que el panel) y por su etiqueta. Sí se exige 3:1 al **indicador de
+foco**, que es el caso que la norma realmente cubre y el único canal de que
+dispone quien navega con teclado.
+
+### 6.7 Lo que funcionaba y se conservó
+
+- La dualidad Básico/Avanzado, conceptualmente bien resuelta.
+- Los ~42 tooltips, de calidad inusual: explican el *porqué* y dan rangos
+  orientativos en vez de repetir la etiqueta.
+- El panel de calidad codificando la estrategia por fiabilidad.
+- La correspondencia A/B/C entre el panel de parámetros y el de ejecución.

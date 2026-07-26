@@ -93,15 +93,35 @@ def main() -> int:
             print(f"  ✗ {msg}")
             fallos.append(msg)
 
-    # ── Estado inicial: el reporte no se puede exportar todavía ─────────
+    # ── Estado inicial ──────────────────────────────────────────────────
     check(not win.act_export_report.isEnabled(),
           "el reporte arranca deshabilitado (no hay nada que reportar)")
     check(win.lbl_q_strategy.text() == "Estrategia: —",
           "el panel de calidad arranca vacío")
+    check(all(p.estado() == "pendiente"
+              for p in (win.paso_a, win.paso_b, win.paso_c)),
+          "los tres pasos arrancan en «pendiente»")
+    # isHidden() y no isVisible(): la ventana no se llega a mostrar en el
+    # test, y isVisible() es False para cualquier hijo de una ventana oculta.
+    check(not win.empty_state.isHidden(),
+          "el visor muestra el estado vacío al arrancar")
+    check(not win.edit_toolbar.isEnabled(),
+          "la barra de edición arranca desactivada (no hay nada que editar)")
+    check(not win.btn_run_all.isEnabled(),
+          "«Ejecutar todo» arranca desactivado")
 
     # ── Cargar la nube (sin diálogo de archivo) ─────────────────────────
     win.raw_pcd      = o3d.io.read_point_cloud(BUNNY)
     win._source_path = BUNNY
+    win._mostrar_estado_vacio(False)
+    win._refresh_pipeline_state()
+
+    check(win.empty_state.isHidden(),
+          "el estado vacío desaparece al haber datos")
+    check(win.paso_a.estado() == "listo" and win.paso_c.estado() == "pendiente",
+          "con solo la nube cargada, A está listo y C sigue pendiente")
+    check(win.edit_toolbar.isEnabled(),
+          "la barra de edición se activa al haber una nube")
 
     # ── A → B → C ───────────────────────────────────────────────────────
     p = win.param_panel
@@ -115,8 +135,10 @@ def main() -> int:
     stats_c = r_c["stats"]
 
     # ── 1.2 · El panel de calidad refleja las métricas reales ───────────
-    check(stats_c["strategy_used"] in win.lbl_q_strategy.text(),
-          f"la estrategia '{stats_c['strategy_used']}' aparece en el panel")
+    legible = win._ESTRATEGIA_NOMBRE.get(stats_c["strategy_used"],
+                                         stats_c["strategy_used"])
+    check(legible in win.lbl_q_strategy.text(),
+          f"la estrategia «{legible}» aparece en el panel")
 
     fid_txt = win.lbl_q_fidelity.text()
     check("%" in fid_txt and "—" not in fid_txt,
@@ -126,17 +148,43 @@ def main() -> int:
           f"el cierre topológico se muestra ({win.lbl_q_closed.text()})")
 
     check(stats_c["volume"] is not None
-          and "n/d" not in win.lbl_q_volume.text(),
+          and "no aplica" not in win.lbl_q_volume.text(),
           f"el volumen se muestra ({win.lbl_q_volume.text()})")
 
+    corta = win._ESTRATEGIA_CORTA.get(stats_c["strategy_used"],
+                                      stats_c["strategy_used"])
     check(win.lbl_q_cascade.text() != "—"
-          and stats_c["strategy_used"] in win.lbl_q_cascade.text(),
-          "la cascada de estrategias se muestra")
+          and corta in win.lbl_q_cascade.text()
+          and "✓" in win.lbl_q_cascade.text(),
+          "la cascada marca con ✓ la estrategia que ganó")
 
-    # ── N2 · malla y sólido ya no comparten etiqueta ────────────────────
-    check(win.lbl_mesh_info.text().startswith("Malla:")
-          and win.lbl_solid_info.text().startswith("Sólido:"),
-          "la malla y el sólido tienen etiquetas separadas")
+    # Ningún identificador interno debe llegar a la interfaz
+    textos_ui = " ".join([
+        win.lbl_q_strategy.text(), win.lbl_q_cascade.text(),
+        win.paso_b.lbl_resumen.text(),
+    ])
+    check(not any(t in textos_ui for t in ("repair", "ball_pivoting",
+                                           "alpha_shape", "passthrough")),
+          "la interfaz usa nombres legibles, no los identificadores internos")
+
+    # ── Cada paso conserva su propio resumen ────────────────────────────
+    # Antes la malla y el sólido compartían una etiqueta y al terminar C se
+    # perdía de vista el resultado de B.
+    check(win.paso_a.lbl_resumen.text() != "—"
+          and win.paso_b.lbl_resumen.text() != "—"
+          and win.paso_c.lbl_resumen.text() != "—",
+          "los tres pasos muestran su resumen a la vez")
+    check(all(p.estado() == "hecho"
+              for p in (win.paso_a, win.paso_b, win.paso_c)),
+          "los tres pasos quedan marcados como completados")
+    check(all(p.btn_ver.isEnabled()
+              for p in (win.paso_a, win.paso_b, win.paso_c)),
+          "los tres productos se pueden visualizar")
+
+    # ── Formato numérico en español ─────────────────────────────────────
+    resumen_b = win.paso_b.lbl_resumen.text()
+    check("." in resumen_b and ",000" not in resumen_b,
+          f"los millares usan punto, no coma ({resumen_b.splitlines()[0]})")
 
     # ── 1.1 · los parámetros relativos llegaron al núcleo ───────────────
     stats_b = r_b["stats"]
@@ -186,12 +234,20 @@ def main() -> int:
             check(os.path.getsize(destino) > 200,
                   f"{nombre} se escribe en disco con contenido")
 
-    # ── Invalidación: re-ejecutar B debe limpiar el panel del sólido ────
+    # ── Invalidación: re-ejecutar B debe limpiar el sólido anterior ─────
     _ejecutar_bloque(main_gui, win, main_gui.WorkerThread.BLOCK_RECONSTRUCT,
                      {"point_cloud": win.clean_pcd}, p.get_rec_params())
-    check(win.lbl_q_strategy.text() == "Estrategia: —"
-          and win.lbl_solid_info.text() == "Sólido: —",
+    check(win.lbl_q_strategy.text() == "Estrategia: —",
           "re-ejecutar B limpia el panel de calidad del sólido anterior")
+    # C pierde su producto pero queda «listo», no «pendiente»: la malla de B
+    # sigue existiendo, así que se puede volver a solidificar.
+    check(win.paso_c.lbl_resumen.text() == "—"
+          and win.paso_c.estado() == "listo"
+          and not win.paso_c.btn_ver.isEnabled(),
+          "re-ejecutar B invalida el producto de C pero lo deja ejecutable")
+    check(win.paso_b.estado() == "hecho"
+          and win.paso_a.estado() == "hecho",
+          "re-ejecutar B conserva A y B")
     check(len(win._runs) == 4,
           "la bitácora conserva también la re-ejecución")
 
