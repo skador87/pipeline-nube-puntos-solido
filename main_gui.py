@@ -9,11 +9,14 @@
 
 import sys
 import os
+import json
+import time
 import traceback
 import numpy as np
 import open3d as o3d
 
 from copy import deepcopy
+from datetime import datetime
 from PyQt5.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter,
     QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -159,9 +162,14 @@ class WorkerThread(QThread):
         self.block  = block
         self.data   = data
         self.params = params
+        self._t0    = None
 
     def run(self):
         try:
+            # Se cronometra aquí, alrededor del bloque completo: es el tiempo
+            # que el usuario percibe y el que hay que poder citar en la
+            # memoria junto a los parámetros que lo produjeron.
+            self._t0 = time.perf_counter()
             if self.block == self.BLOCK_PREPROCESS:
                 self._run_preprocess()
             elif self.block == self.BLOCK_RECONSTRUCT:
@@ -174,6 +182,9 @@ class WorkerThread(QThread):
             self.error_signal.emit(
                 f"{type(e).__name__}: {e}\n{traceback.format_exc()}"
             )
+
+    def _elapsed(self) -> float:
+        return round(time.perf_counter() - self._t0, 2) if self._t0 else 0.0
 
     def _run_preprocess(self):
         self.log_signal.emit("━━━ BLOQUE A: Preprocesamiento ━━━")
@@ -192,6 +203,8 @@ class WorkerThread(QThread):
             "block"       : self.BLOCK_PREPROCESS,
             "point_cloud" : pcd_clean,
             "stats"       : stats,
+            "params"      : self.params,
+            "elapsed_s"   : self._elapsed(),
         })
 
     def _run_reconstruct(self):
@@ -212,9 +225,11 @@ class WorkerThread(QThread):
             f"[método: {stats['method']}]"
         )
         self.result_signal.emit({
-            "block" : self.BLOCK_RECONSTRUCT,
-            "mesh"  : mesh,
-            "stats" : stats,
+            "block"     : self.BLOCK_RECONSTRUCT,
+            "mesh"      : mesh,
+            "stats"     : stats,
+            "params"    : self.params,
+            "elapsed_s" : self._elapsed(),
         })
 
     def _run_solidify(self):
@@ -235,6 +250,8 @@ class WorkerThread(QThread):
             "block"     : self.BLOCK_SOLIDIFY,
             "mesh"      : solid_mesh,
             "stats"     : stats,
+            "params"    : self.params,
+            "elapsed_s" : self._elapsed(),
         })
 
 
@@ -542,6 +559,12 @@ class ParamPanel(QScrollArea):
 
         # ── Resguardos de robustez (siempre fijos en modo básico) ──────
         self.pre_remove_invalid.setChecked(True)
+        # Escala relativa a d̄: en modo absoluto un radio mal elegido puede
+        # dejar Ball Pivoting corriendo indefinidamente.
+        self.bp_radius_mode.setCurrentIndex(0)
+        self.alpha_mode.setCurrentIndex(0)
+        self.bp_radius_factor.setValue(2.0)
+        self.alpha_factor.setValue(5.0)
         self.sol_voxel_auto.setChecked(True)
         self.sol_merge_eps.setValue(0.5)
         self.sol_strategy_repair.setChecked(True)
@@ -771,25 +794,64 @@ class ParamPanel(QScrollArea):
         self.poisson_depth.setValue(10)
         gml.addWidget(self.poisson_depth, 1, 1)
 
-        gml.addWidget(QLabel("BP radius:"), 2, 0)
+        gml.addWidget(QLabel("BP radio — modo:"), 2, 0)
+        self.bp_radius_mode = QComboBox()
+        self.bp_radius_mode.addItems(["relativo a d̄", "absoluto"])
+        gml.addWidget(self.bp_radius_mode, 2, 1)
+
+        gml.addWidget(QLabel("    factor × d̄:"), 3, 0)
+        self.bp_radius_factor = QDoubleSpinBox()
+        self.bp_radius_factor.setRange(0.5, 20.0)
+        self.bp_radius_factor.setSingleStep(0.5)
+        self.bp_radius_factor.setValue(2.0)
+        gml.addWidget(self.bp_radius_factor, 3, 1)
+
+        gml.addWidget(QLabel("    valor absoluto:"), 4, 0)
         self.bp_radius = QDoubleSpinBox()
-        self.bp_radius.setRange(0.001, 10.0)
-        self.bp_radius.setSingleStep(0.1)
+        self.bp_radius.setRange(0.0001, 10.0)
+        self.bp_radius.setSingleStep(0.001)
+        self.bp_radius.setDecimals(4)
         self.bp_radius.setValue(1.0)
-        gml.addWidget(self.bp_radius, 2, 1)
+        self.bp_radius.setEnabled(False)
+        gml.addWidget(self.bp_radius, 4, 1)
 
-        gml.addWidget(QLabel("Alpha:"), 3, 0)
+        gml.addWidget(QLabel("Alpha — modo:"), 5, 0)
+        self.alpha_mode = QComboBox()
+        self.alpha_mode.addItems(["relativo a d̄", "absoluto"])
+        gml.addWidget(self.alpha_mode, 5, 1)
+
+        gml.addWidget(QLabel("    factor × d̄:"), 6, 0)
+        self.alpha_factor = QDoubleSpinBox()
+        self.alpha_factor.setRange(0.5, 50.0)
+        self.alpha_factor.setSingleStep(0.5)
+        self.alpha_factor.setValue(5.0)
+        gml.addWidget(self.alpha_factor, 6, 1)
+
+        gml.addWidget(QLabel("    valor absoluto:"), 7, 0)
         self.alpha_val = QDoubleSpinBox()
-        self.alpha_val.setRange(0.001, 5.0)
-        self.alpha_val.setSingleStep(0.01)
+        self.alpha_val.setRange(0.0001, 5.0)
+        self.alpha_val.setSingleStep(0.001)
+        self.alpha_val.setDecimals(4)
         self.alpha_val.setValue(0.1)
-        gml.addWidget(self.alpha_val, 3, 1)
+        self.alpha_val.setEnabled(False)
+        gml.addWidget(self.alpha_val, 7, 1)
 
-        gml.addWidget(QLabel("Alpha downsample:"), 4, 0)
+        # El campo activo depende del modo: así queda claro cuál de los dos
+        # valores se está aplicando de verdad.
+        self.bp_radius_mode.currentIndexChanged.connect(
+            lambda i: (self.bp_radius_factor.setEnabled(i == 0),
+                       self.bp_radius.setEnabled(i == 1))
+        )
+        self.alpha_mode.currentIndexChanged.connect(
+            lambda i: (self.alpha_factor.setEnabled(i == 0),
+                       self.alpha_val.setEnabled(i == 1))
+        )
+
+        gml.addWidget(QLabel("Alpha downsample:"), 8, 0)
         self.alpha_ds = QSpinBox()
         self.alpha_ds.setRange(1, 20)
         self.alpha_ds.setValue(1)
-        gml.addWidget(self.alpha_ds, 4, 1)
+        gml.addWidget(self.alpha_ds, 8, 1)
 
         lay.addWidget(g_method)
 
@@ -857,13 +919,33 @@ class ParamPanel(QScrollArea):
                 "Profundidad del octree = resolución de la superficie. 8–9 "
                 "para objetos simples, 10–11 para detalle fino. Cada +1 "
                 "duplica la resolución y multiplica triángulos y tiempo.",
+            self.bp_radius_mode:
+                "<b>relativo a d̄</b> (recomendado): el radio se calcula "
+                "sobre la escala de la nube, así el mismo valor sirve para "
+                "el bunny y para un escaneo en metros."
+                "<br><b>absoluto</b>: radio fijo en unidades de la nube. "
+                "Un valor mayor que el objeto hace que Ball Pivoting no "
+                "termine nunca.",
+            self.bp_radius_factor:
+                "Radio de la esfera pivotante como múltiplo de d̄ (la "
+                "distancia típica entre puntos vecinos). También se usa "
+                "radio×2. Orientativo: 1.5–3. Por debajo de 1 la esfera no "
+                "alcanza a los vecinos y no se forma ningún triángulo.",
             self.bp_radius:
-                "Radio de la esfera pivotante de Ball Pivoting (en unidades "
-                "de la nube; también se usa radio×2). Orientativo: 2–4× la "
-                "distancia media entre puntos.",
+                "Radio de la esfera pivotante en unidades de la nube. Solo "
+                "se aplica con el modo «absoluto». Debe ser mucho menor que "
+                "el objeto: como referencia, el bunny mide 0.25 de diagonal.",
+            self.alpha_mode:
+                "<b>relativo a d̄</b> (recomendado): alpha proporcional al "
+                "espaciado real de la nube."
+                "<br><b>absoluto</b>: valor fijo en unidades de la nube.",
+            self.alpha_factor:
+                "Alpha como múltiplo de d̄. Menor = envolvente más ajustada "
+                "al detalle (puede fragmentarse); mayor = más gruesa y "
+                "cerrada. Orientativo: 3–8.",
             self.alpha_val:
-                "Alpha de la envolvente: menor = más ajustada al detalle "
-                "(puede fragmentarse); mayor = más gruesa y cerrada.",
+                "Alpha en unidades de la nube. Solo se aplica con el modo "
+                "«absoluto».",
             self.alpha_ds:
                 "Submuestreo previo para Alpha Shape (1 = usar todos los "
                 "puntos). Subirlo acelera a costa de detalle.",
@@ -1078,7 +1160,16 @@ class ParamPanel(QScrollArea):
         return {
             "method"            : self.rec_method.currentText(),
             "poisson_depth"     : self.poisson_depth.value(),
+            # Índice 0 = "relativo a d̄", 1 = "absoluto"
+            "bp_radius_mode"    : ("relative"
+                                   if self.bp_radius_mode.currentIndex() == 0
+                                   else "absolute"),
+            "bp_radius_factor"  : self.bp_radius_factor.value(),
             "bp_radius"         : self.bp_radius.value(),
+            "alpha_mode"        : ("relative"
+                                   if self.alpha_mode.currentIndex() == 0
+                                   else "absolute"),
+            "alpha_factor"      : self.alpha_factor.value(),
             "alpha"             : self.alpha_val.value(),
             "alpha_downsample"  : self.alpha_ds.value(),
             "remove_webbing"    : self.remove_webbing.isChecked(),
@@ -1511,6 +1602,15 @@ class MainWindow(QMainWindow):
         self._current_view      : str | None = None
         self._measure_p1        : np.ndarray | None = None
 
+        # ── Bitácora de la sesión ──────────────────────────────────────
+        # Cada ejecución de un bloque deja aquí sus parámetros, métricas y
+        # tiempo. Antes las stats se usaban para pintar una etiqueta y se
+        # descartaban, así que la trazabilidad "qué parámetros produjeron
+        # este sólido" vivía solo en el log, que no se puede guardar.
+        self._session_start = datetime.now()
+        self._source_path   : str | None = None
+        self._runs          : list = []
+
         # ── Formatos de importación según librerías disponibles ───────
         exts   = list(self._IMPORT_EXTS_BASE)
         avisos = []
@@ -1586,7 +1686,7 @@ class MainWindow(QMainWindow):
         right_panel = self._build_right_panel()
         splitter.addWidget(right_panel)
 
-        splitter.setSizes([290, 900, 210])
+        splitter.setSizes([290, 870, 240])
 
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
@@ -1596,7 +1696,7 @@ class MainWindow(QMainWindow):
         lay = QVBoxLayout(w)
         lay.setSpacing(8)
         lay.setContentsMargins(4, 4, 4, 4)
-        w.setFixedWidth(210)
+        w.setFixedWidth(240)
 
         g_io = QGroupBox("Entrada / Salida")
         gio  = QVBoxLayout(g_io)
@@ -1618,12 +1718,22 @@ class MainWindow(QMainWindow):
         self.act_export_solid.triggered.connect(self._export_solid_mesh)
         self.act_export_solid.setEnabled(False)
 
+        self.act_export_report = QAction("Exportar reporte de sesión…", self)
+        self.act_export_report.triggered.connect(self._export_session_report)
+        self.act_export_report.setEnabled(False)
+        self.act_export_report.setToolTip(_tt(
+            "Guarda en un archivo los parámetros, las métricas y los "
+            "tiempos de cada bloque ejecutado en esta sesión. Es la "
+            "trazabilidad de qué configuración produjo qué resultado."))
+
         self.btn_export = QPushButton("💾 Exportar…")
         self.btn_export.setEnabled(False)
         menu_export = QMenu(self.btn_export)
         menu_export.addAction(self.act_export_cloud)
         menu_export.addAction(self.act_export_mesh)
         menu_export.addAction(self.act_export_solid)
+        menu_export.addSeparator()
+        menu_export.addAction(self.act_export_report)
         self.btn_export.setMenu(menu_export)
         gio.addWidget(self.btn_export)
 
@@ -1687,7 +1797,11 @@ class MainWindow(QMainWindow):
 
         lay.addWidget(g_edit)
 
-        g_info = QGroupBox("Info")
+        # ── Productos del pipeline ──────────────────────────────────────
+        # Una etiqueta por producto: antes la malla y el sólido compartían
+        # una sola, así que al terminar C se perdía de vista el resultado
+        # de B sin forma de recuperarlo salvo re-ejecutando.
+        g_info = QGroupBox("Productos")
         ginf   = QVBoxLayout(g_info)
 
         self.lbl_pcd_info  = QLabel("Nube: —")
@@ -1698,10 +1812,58 @@ class MainWindow(QMainWindow):
         self.lbl_mesh_info.setWordWrap(True)
         ginf.addWidget(self.lbl_mesh_info)
 
-        self.lbl_watertight = QLabel("Watertight: —")
-        ginf.addWidget(self.lbl_watertight)
+        self.lbl_solid_info = QLabel("Sólido: —")
+        self.lbl_solid_info.setWordWrap(True)
+        ginf.addWidget(self.lbl_solid_info)
 
         lay.addWidget(g_info)
+
+        # ── Panel de calidad del sólido ─────────────────────────────────
+        # La cascada de solidificación ya calculaba todo esto; hasta ahora
+        # solo llegaba al log, donde se pierde entre el resto de mensajes.
+        g_qual = QGroupBox("Calidad del sólido")
+        gq     = QVBoxLayout(g_qual)
+        gq.setSpacing(3)
+
+        self.lbl_q_strategy  = QLabel("Estrategia: —")
+        self.lbl_q_fidelity  = QLabel("Fidelidad: —")
+        self.lbl_q_closed    = QLabel("Cerrado: —")
+        self.lbl_q_volume    = QLabel("Volumen: —")
+        self.lbl_q_holes     = QLabel("Agujeros entrada: —")
+
+        for lbl in (self.lbl_q_strategy, self.lbl_q_fidelity,
+                    self.lbl_q_closed, self.lbl_q_volume,
+                    self.lbl_q_holes):
+            lbl.setWordWrap(True)
+            gq.addWidget(lbl)
+
+        sep = QFrame()
+        sep.setFrameShape(QFrame.HLine)
+        sep.setStyleSheet("color: #3a3a44;")
+        gq.addWidget(sep)
+
+        cascada_hdr = QLabel("Cascada de estrategias")
+        cascada_hdr.setStyleSheet("color: #82b4d0; font-size: 10px;")
+        gq.addWidget(cascada_hdr)
+
+        self.lbl_q_cascade = QLabel("—")
+        self.lbl_q_cascade.setWordWrap(True)
+        self.lbl_q_cascade.setStyleSheet(
+            "font-family: monospace; font-size: 10px; color: #9ab0c0;")
+        gq.addWidget(self.lbl_q_cascade)
+
+        g_qual.setToolTip(_tt(
+            "Resultado del control de calidad de la solidificación."
+            "<br><b>Estrategia</b>: cuál de las cuatro logró cerrar el "
+            "sólido cumpliendo la tolerancia de fidelidad."
+            "<br><b>Fidelidad</b>: distancia de Chamfer media entre el "
+            "sólido y la malla de entrada, como % de la diagonal del "
+            "objeto. Más bajo es mejor."
+            "<br><b>Cascada</b>: qué se probó y con qué resultado, en "
+            "orden. Sirve para entender por qué ganó la estrategia que "
+            "ganó."))
+
+        lay.addWidget(g_qual)
         lay.addStretch()
 
         return w
@@ -2039,6 +2201,11 @@ class MainWindow(QMainWindow):
 
         m_file.addSeparator()
 
+        self.act_export_report.setShortcut("Ctrl+R")
+        m_file.addAction(self.act_export_report)
+
+        m_file.addSeparator()
+
         a_quit = QAction("Salir", self)
         a_quit.setShortcut("Ctrl+Q")
         a_quit.triggered.connect(self.close)
@@ -2182,6 +2349,14 @@ class MainWindow(QMainWindow):
             self._transform_history.clear()
             self._current_view = "raw"
 
+            # Nube nueva = sesión nueva: las ejecuciones anteriores son de
+            # otro dataset y mezclarlas en el reporte sería engañoso.
+            self._source_path = path
+            self._runs.clear()
+            self.lbl_mesh_info.setText("Malla: —")
+            self.lbl_solid_info.setText("Sólido: —")
+            self._reset_quality_panel()
+
             # Paso de movimiento proporcional al tamaño del modelo
             diag = float(np.linalg.norm(
                 np.asarray(pcd.get_max_bound()) -
@@ -2290,6 +2465,181 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             self._show_error(f"Error al exportar:\n{e}")
+
+    # ══════════════════════════════════════════════════════════════
+    #  REPORTE DE SESIÓN
+    # ══════════════════════════════════════════════════════════════
+
+    _BLOQUE_NOMBRE = {
+        WorkerThread.BLOCK_PREPROCESS  : "A · Preprocesamiento",
+        WorkerThread.BLOCK_RECONSTRUCT : "B · Reconstrucción",
+        WorkerThread.BLOCK_SOLIDIFY    : "C · Solidificación",
+    }
+
+    def _record_run(self, result: dict):
+        """Anota una ejecución de bloque en la bitácora de la sesión."""
+        self._runs.append({
+            "bloque"     : result["block"],
+            "nombre"     : self._BLOQUE_NOMBRE.get(result["block"],
+                                                   result["block"]),
+            "hora"       : datetime.now().isoformat(timespec="seconds"),
+            "duracion_s" : result.get("elapsed_s"),
+            "parametros" : self._jsonable(result.get("params") or {}),
+            "metricas"   : self._jsonable(result.get("stats") or {}),
+        })
+        self.act_export_report.setEnabled(True)
+
+    @staticmethod
+    def _jsonable(obj):
+        """
+        Convierte a tipos serializables. Las stats traen escalares de numpy
+        (np.float64, np.bool_) que `json.dump` rechaza, y diccionarios
+        anidados como `strategies_tried`.
+        """
+        if isinstance(obj, dict):
+            return {str(k): MainWindow._jsonable(v) for k, v in obj.items()}
+        if isinstance(obj, (list, tuple)):
+            return [MainWindow._jsonable(v) for v in obj]
+        if isinstance(obj, (np.bool_, bool)):
+            return bool(obj)
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return MainWindow._jsonable(obj.tolist())
+        if obj is None or isinstance(obj, (str, int, float)):
+            return obj
+        return str(obj)
+
+    def _session_report(self) -> dict:
+        """Arma el reporte completo de la sesión."""
+        return {
+            "generado"   : datetime.now().isoformat(timespec="seconds"),
+            "inicio"     : self._session_start.isoformat(timespec="seconds"),
+            "dataset"    : (os.path.basename(self._source_path)
+                            if self._source_path else None),
+            "ruta"       : self._source_path,
+            "aplicacion" : "3D Point Cloud Processor v2.1",
+            "entorno"    : {
+                "python" : sys.version.split()[0],
+                "open3d" : o3d.__version__,
+                "numpy"  : np.__version__,
+            },
+            "puntos_originales" : (len(self.raw_pcd.points)
+                                   if self.raw_pcd else None),
+            "ejecuciones"       : self._runs,
+            "tiempo_total_s"    : round(sum(
+                r["duracion_s"] or 0 for r in self._runs), 2),
+        }
+
+    def _report_markdown(self, rep: dict) -> str:
+        """Versión legible del reporte, para pegar en la memoria."""
+        L = []
+        L.append("# Reporte de sesión — Point Cloud Processor")
+        L.append("")
+        L.append(f"- **Dataset:** `{rep['dataset'] or '—'}`")
+        L.append(f"- **Generado:** {rep['generado']}")
+        n_pts = rep["puntos_originales"]
+        L.append(f"- **Puntos originales:** "
+                 f"{n_pts:,}" if n_pts else "- **Puntos originales:** —")
+        L.append(f"- **Tiempo total:** {rep['tiempo_total_s']} s")
+        e = rep["entorno"]
+        L.append(f"- **Entorno:** Python {e['python']}, "
+                 f"Open3D {e['open3d']}, numpy {e['numpy']}")
+        L.append("")
+
+        if not rep["ejecuciones"]:
+            L.append("_No se ejecutó ningún bloque en esta sesión._")
+            return "\n".join(L)
+
+        L.append("## Resumen de tiempos")
+        L.append("")
+        L.append("| Bloque | Hora | Duración (s) |")
+        L.append("|---|---|---|")
+        for r in rep["ejecuciones"]:
+            L.append(f"| {r['nombre']} | {r['hora'][11:]} "
+                     f"| {r['duracion_s']} |")
+        L.append("")
+
+        for i, r in enumerate(rep["ejecuciones"], 1):
+            L.append(f"## {i}. {r['nombre']}")
+            L.append("")
+            L.append(f"Duración: **{r['duracion_s']} s** — {r['hora']}")
+            L.append("")
+            L.append("### Parámetros")
+            L.append("")
+            L.append("| Parámetro | Valor |")
+            L.append("|---|---|")
+            for k, v in sorted(r["parametros"].items()):
+                L.append(f"| `{k}` | {v} |")
+            L.append("")
+            L.append("### Métricas")
+            L.append("")
+            L.append("| Métrica | Valor |")
+            L.append("|---|---|")
+            for k, v in r["metricas"].items():
+                if isinstance(v, dict):
+                    # strategies_tried: una fila por estrategia probada
+                    for sub, det in v.items():
+                        err = det.get("fidelity_error")
+                        err = "—" if err is None else f"{err:.4%}"
+                        L.append(f"| `{k}.{sub}` | "
+                                 f"cerrada={det.get('watertight')}, "
+                                 f"error={err} |")
+                elif isinstance(v, float):
+                    L.append(f"| `{k}` | {v:.6g} |")
+                else:
+                    L.append(f"| `{k}` | {v} |")
+            L.append("")
+
+        return "\n".join(L)
+
+    def _export_session_report(self):
+        """Exporta la bitácora de la sesión a JSON o Markdown."""
+        if not self._runs:
+            self._show_error(
+                "Todavía no hay nada que reportar.\n\n"
+                "Ejecuta al menos un bloque del pipeline (A, B o C) y "
+                "vuelve a intentarlo."
+            )
+            return
+
+        base = "reporte_sesion"
+        if self._source_path:
+            base = (f"reporte_{os.path.splitext(os.path.basename(self._source_path))[0]}"
+                    f"_{datetime.now():%Y%m%d_%H%M}")
+
+        path, fmt = QFileDialog.getSaveFileName(
+            self, "Exportar reporte de sesión", base,
+            "Markdown (*.md);;JSON (*.json)",
+        )
+        if not path:
+            return
+        if not os.path.splitext(path)[1]:
+            path += ".json" if "json" in fmt.lower() else ".md"
+
+        try:
+            rep = self._session_report()
+            if path.lower().endswith(".json"):
+                contenido = json.dumps(rep, indent=2, ensure_ascii=False)
+            else:
+                contenido = self._report_markdown(rep)
+
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(contenido)
+
+            self._log(f"  ✓ Reporte de sesión exportado: "
+                      f"{os.path.basename(path)} "
+                      f"({len(self._runs)} ejecuciones)")
+            self._status(f"Reporte exportado: {os.path.basename(path)}")
+
+        except OSError as e:
+            self._show_error(
+                f"No se pudo guardar el reporte en:\n{path}\n\n"
+                f"Comprueba que la carpeta existe y que tienes permiso "
+                f"de escritura.\n\nDetalle: {e}"
+            )
 
     # ══════════════════════════════════════════════════════════════
     #  PIPELINE  (sin cambios)
@@ -2454,6 +2804,10 @@ class MainWindow(QMainWindow):
         # ellos sin desalinearlos.
         self._transform_history.clear()
 
+        # Registrar la ejecución antes de tocar la UI: es lo que después
+        # alimenta el reporte de sesión.
+        self._record_run(result)
+
         if block == WorkerThread.BLOCK_PREPROCESS:
             # Sobrescribe la nube limpia e invalida los productos aguas
             # abajo: la malla/sólido anteriores ya no corresponden.
@@ -2466,7 +2820,8 @@ class MainWindow(QMainWindow):
             self.act_export_mesh.setEnabled(False)
             self.act_export_solid.setEnabled(False)
             self.lbl_mesh_info.setText("Malla: —")
-            self.lbl_watertight.setText("Watertight: —")
+            self.lbl_solid_info.setText("Sólido: —")
+            self._reset_quality_panel()
             self._current_view = "clean"
             self.viewport.show_point_cloud(self.clean_pcd)
             self.btn_show_pcd.setEnabled(True)
@@ -2479,6 +2834,8 @@ class MainWindow(QMainWindow):
             self.solid_mesh = None
             self.btn_show_solid.setEnabled(False)
             self.act_export_solid.setEnabled(False)
+            self.lbl_solid_info.setText("Sólido: —")
+            self._reset_quality_panel()
             self._current_view = "mesh"
             self.viewport.show_mesh(self.recon_mesh)
             self.btn_show_mesh.setEnabled(True)
@@ -2584,27 +2941,123 @@ class MainWindow(QMainWindow):
         )
 
     def _update_mesh_label(self, stats: dict):
+        wt = stats.get("is_closed")
+        cierre = "—" if wt is None else ("cerrada" if wt else "abierta")
         self.lbl_mesh_info.setText(
             f"Malla: {stats['final_vertices']:,}v "
             f"{stats['final_triangles']:,}t\n"
-            f"[{stats['method']}]"
+            f"[{stats['method']}, {cierre}]"
         )
-        wt = stats.get("is_closed")
-        if wt is None:
-            self.lbl_watertight.setText("Watertight: —")
-        else:
-            self.lbl_watertight.setText(
-                f"Watertight: {'✓ Sí' if wt else '✗ No'}"
-            )
 
     def _update_solid_label(self, stats: dict):
-        wt = "✓ Sí" if stats["is_watertight"] else "✗ No"
-        self.lbl_mesh_info.setText(
+        self.lbl_solid_info.setText(
             f"Sólido: {stats['output_vertices']:,}v "
-            f"{stats['output_triangles']:,}t\n"
-            f"[{stats['strategy_used']}]"
+            f"{stats['output_triangles']:,}t"
         )
-        self.lbl_watertight.setText(f"Watertight: {wt}")
+        self._update_quality_panel(stats)
+
+    # ══════════════════════════════════════════════════════════════
+    #  PANEL DE CALIDAD
+    # ══════════════════════════════════════════════════════════════
+
+    _OK    = "#8fd08f"
+    _WARN  = "#d0b070"
+    _BAD   = "#d08080"
+    _MUTED = "#9ab0c0"
+
+    def _update_quality_panel(self, stats: dict):
+        """
+        Vuelca en el panel el resultado del control de calidad de la
+        cascada. Todo esto ya lo calculaba `MeshSolidifier`; hasta ahora
+        solo se podía leer en el log.
+        """
+        def pintar(lbl, texto, color):
+            lbl.setText(texto)
+            lbl.setStyleSheet(f"color: {color};")
+
+        # ── Estrategia ganadora ─────────────────────────────────────────
+        estrategia = stats.get("strategy_used", "—")
+        # 'passthrough' significa que ninguna estrategia produjo nada y se
+        # devolvió la malla de entrada tal cual: no hay sólido de verdad.
+        # 'hull' cierra siempre, pero destruyendo las concavidades.
+        color_est = {
+            "repair"      : self._OK,
+            "poisson"     : self._OK,
+            "voxel"       : self._WARN,
+            "hull"        : self._BAD,
+            "passthrough" : self._BAD,
+        }.get(estrategia, self._MUTED)
+        pintar(self.lbl_q_strategy, f"Estrategia: {estrategia}", color_est)
+
+        # ── Error de fidelidad ──────────────────────────────────────────
+        fid = stats.get("fidelity_error")
+        if fid is None:
+            pintar(self.lbl_q_fidelity,
+                   "Fidelidad: no medida", self._MUTED)
+        else:
+            tol = self.param_panel.sol_fidelity_max.value() / 100.0
+            color = self._OK if fid <= tol else self._BAD
+            pintar(self.lbl_q_fidelity,
+                   f"Fidelidad: {fid:.4%}  (tol. {tol:.2%})", color)
+
+        # ── Cierre topológico ───────────────────────────────────────────
+        cerrado    = bool(stats.get("is_watertight"))
+        orientable = bool(stats.get("is_orientable"))
+        pintar(self.lbl_q_closed,
+               f"Cerrado: {'✓ sí' if cerrado else '✗ no'}   "
+               f"Orientable: {'✓' if orientable else '✗'}",
+               self._OK if cerrado else self._BAD)
+
+        # ── Volumen ─────────────────────────────────────────────────────
+        vol = stats.get("volume")
+        if vol is None:
+            pintar(self.lbl_q_volume,
+                   "Volumen: n/d (malla abierta)", self._MUTED)
+        else:
+            pintar(self.lbl_q_volume, f"Volumen: {vol:.6g}", self._MUTED)
+
+        # ── Agujeros de la malla de entrada ─────────────────────────────
+        holes = stats.get("holes_found")
+        pintar(self.lbl_q_holes,
+               f"Agujeros entrada: "
+               f"{'—' if holes is None else f'{holes:,} aristas'}",
+               self._MUTED)
+
+        # ── Cascada de estrategias probadas ─────────────────────────────
+        tried = stats.get("strategies_tried") or {}
+        if not tried:
+            self.lbl_q_cascade.setText("—")
+            self.lbl_q_cascade.setToolTip("")
+            return
+
+        lineas = []
+        for nombre, r in tried.items():
+            err = r.get("fidelity_error")
+            err_txt = "—" if err is None else f"{err:.3%}"
+            marca = "✓" if nombre == estrategia else " "
+            cierra = "cerr" if r.get("watertight") else "abre"
+            lineas.append(f"{marca} {nombre:<8} {cierra}  {err_txt}")
+
+        self.lbl_q_cascade.setText("\n".join(lineas))
+        self.lbl_q_cascade.setToolTip(_tt(
+            "Cada estrategia que se probó, en orden, con si logró cerrar "
+            "la malla y cuánto se alejó de la geometría original. La "
+            "marcada con ✓ es la que se aceptó."))
+
+    def _reset_quality_panel(self):
+        """Limpia el panel cuando el sólido deja de ser válido."""
+        for lbl, texto in (
+            (self.lbl_q_strategy, "Estrategia: —"),
+            (self.lbl_q_fidelity, "Fidelidad: —"),
+            (self.lbl_q_closed,   "Cerrado: —"),
+            (self.lbl_q_volume,   "Volumen: —"),
+            (self.lbl_q_holes,    "Agujeros entrada: —"),
+            (self.lbl_q_cascade,  "—"),
+        ):
+            lbl.setText(texto)
+            lbl.setStyleSheet("")
+        self.lbl_q_cascade.setStyleSheet(
+            "font-family: monospace; font-size: 10px; color: #9ab0c0;")
 
     # ══════════════════════════════════════════════════════════════
     #  UTILIDADES  (sin cambios)

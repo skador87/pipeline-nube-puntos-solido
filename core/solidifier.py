@@ -107,6 +107,7 @@ class MeshSolidifier:
             - is_orientable       : bool
             - holes_found         : int | None  (aristas frontera en la entrada)
             - fidelity_error      : float | None (Chamfer medio / diagonal bbox)
+            - volume              : float | None (solo si la malla es cerrada)
             - strategies_tried    : dict  (por estrategia: watertight y error)
         """
         # ── Combinar params con defaults ───────────────────────────────────
@@ -124,6 +125,7 @@ class MeshSolidifier:
             "is_orientable"    : False,
             "holes_found"      : None,
             "fidelity_error"   : None,
+            "volume"           : None,
             "strategies_tried" : {},
         }
 
@@ -155,6 +157,7 @@ class MeshSolidifier:
         stats["output_triangles"]= len(result_mesh.triangles)
         stats["is_watertight"]   = self.is_topologically_closed(result_mesh)
         stats["is_orientable"]   = result_mesh.is_orientable()
+        stats["volume"]          = self.signed_volume(result_mesh)
 
         self._log(f"  ✓ Solidificación completada "
                   f"[estrategia: {strategy_used}]")
@@ -163,6 +166,8 @@ class MeshSolidifier:
         if fidelity is not None:
             self._log(f"  📐 Error de fidelidad (Chamfer/diag): "
                       f"{fidelity:.4%}")
+        if stats["volume"] is not None:
+            self._log(f"  📦 Volumen encerrado: {stats['volume']:.6f}")
         self._log(f"  {'✓' if stats['is_watertight'] else '⚠️'} "
                   f"Watertight: {stats['is_watertight']} | "
                   f"Orientable: {stats['is_orientable']}")
@@ -630,6 +635,26 @@ class MeshSolidifier:
         return (len(mesh.triangles) > 0
                 and mesh.is_edge_manifold(allow_boundary_edges=False)
                 and mesh.is_vertex_manifold())
+
+    @staticmethod
+    def signed_volume(mesh: o3d.geometry.TriangleMesh) -> float | None:
+        """
+        Volumen encerrado por suma de tetraedros firmados, en O(T).
+
+        Devuelve None si la malla no es cerrada (en ese caso el valor no
+        significa nada). No se usa `get_volume()` de Open3D: incluye un test
+        de auto-intersecciones cuadrático que tarda horas en mallas grandes.
+        """
+        if not MeshSolidifier.is_topologically_closed(mesh):
+            return None
+        v = np.asarray(mesh.vertices)
+        t = np.asarray(mesh.triangles)
+        if len(t) == 0:
+            return None
+        p0, p1, p2 = v[t[:, 0]], v[t[:, 1]], v[t[:, 2]]
+        return abs(float(
+            np.einsum("ij,ij->i", p0, np.cross(p1, p2)).sum() / 6.0
+        ))
 
     @staticmethod
     def _basic_clean(mesh: o3d.geometry.TriangleMesh):

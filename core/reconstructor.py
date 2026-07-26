@@ -18,8 +18,12 @@ class MeshReconstructor:
     ──────────────────────────────────────
     method               : str   — "poisson" | "ball_pivoting" | "alpha_shape"
     poisson_depth        : int   — profundidad octree Poisson
-    bp_radius            : float — radio base Ball Pivoting
-    alpha                : float — valor alpha para Alpha Shape
+    bp_radius_mode       : str   — "relative" (× d̄) | "absolute"
+    bp_radius_factor     : float — múltiplo de d̄ si el modo es relativo
+    bp_radius            : float — radio Ball Pivoting si el modo es absoluto
+    alpha_mode           : str   — "relative" (× d̄) | "absolute"
+    alpha_factor         : float — múltiplo de d̄ si el modo es relativo
+    alpha                : float — valor alpha si el modo es absoluto
     alpha_downsample     : int   — factor submuestreo Alpha Shape
     remove_webbing       : bool  — activar filtro phantom webbing
     remove_hollow        : bool  — activar filtro zonas huecas
@@ -28,13 +32,32 @@ class MeshReconstructor:
     taubin_lambda        : float — λ para Taubin
     taubin_mu            : float — μ para Taubin
     laplacian_lambda     : float — λ para Laplacian
+
+    Escala relativa
+    ───────────────
+    `bp_radius` y `alpha` son longitudes: un valor fijo solo puede ser
+    correcto para una escala de objeto concreta. El bunny mide 0.25 unidades
+    de diagonal, así que el antiguo default `bp_radius=1.0` pedía esferas de
+    4× el objeto entero y Ball Pivoting no terminaba nunca. Por eso ahora se
+    expresan por defecto como múltiplos de la escala característica d̄
+    (mediana de la distancia al vecino más cercano), igual que hace todo el
+    preprocesamiento. El modo "absolute" mantiene el comportamiento anterior
+    para quien necesite fijar el valor en unidades de la nube.
     """
 
     # ── Valores por defecto (espejo de ParamPanel en main_gui.py) ──────────
     _DEFAULTS = {
         "method"            : "poisson",
         "poisson_depth"     : 10,
+        # Ball Pivoting: radio ≈ 2·d̄ (la esfera debe alcanzar a los vecinos
+        # inmediatos sin llegar a puentear la superficie contraria).
+        "bp_radius_mode"    : "relative",
+        "bp_radius_factor"  : 2.0,
         "bp_radius"         : 1.0,
+        # Alpha Shape: alpha ≈ 5·d̄ (cierra los huecos del muestreo sin
+        # engordar la envolvente hasta perder las concavidades).
+        "alpha_mode"        : "relative",
+        "alpha_factor"      : 5.0,
         "alpha"             : 0.1,
         "alpha_downsample"  : 1,
         "remove_webbing"    : True,
@@ -59,6 +82,83 @@ class MeshReconstructor:
         self.pcd          = deepcopy(point_cloud)
         self.log_callback = log_callback or print
         self.mesh         = None
+        self._dbar        = None   # escala característica, cacheada
+
+    # ══════════════════════════════════════════════════════════════
+    #  ESCALA CARACTERÍSTICA
+    # ══════════════════════════════════════════════════════════════
+
+    def characteristic_scale(self) -> float:
+        """
+        Escala característica d̄ = mediana de la distancia al vecino más
+        cercano, sobre una muestra con semilla fija (reproducible).
+
+        Misma definición que `PointCloudPreprocessor._characteristic_scale`,
+        pero calculada aquí sobre la nube que realmente se va a triangular:
+        tras voxelizar, el espaciado entre puntos ya no es el de la nube
+        original, y es el espaciado actual el que determina qué radio de
+        esfera tiene sentido. Se cachea porque no cambia durante `run()`.
+        """
+        if self._dbar is not None:
+            return self._dbar
+
+        points = np.asarray(self.pcd.points)
+        if len(points) < 2:
+            self._dbar = 1.0
+            return self._dbar
+
+        rng    = np.random.default_rng(42)
+        n      = min(len(points), 20_000)
+        sample = points[rng.choice(len(points), size=n, replace=False)]
+
+        dists, _ = cKDTree(sample).query(sample, k=2)   # [:,0] es él mismo
+        nn = dists[:, 1]
+        nn = nn[np.isfinite(nn) & (nn > 0)]
+
+        self._dbar = float(np.median(nn)) if len(nn) else 1.0
+        return self._dbar
+
+    def resolve_bp_radius(self, p: dict) -> float:
+        """Radio de Ball Pivoting en unidades de la nube, según el modo."""
+        return self._resolve_length(
+            p, mode_key="bp_radius_mode", factor_key="bp_radius_factor",
+            abs_key="bp_radius", nombre="bp_radius",
+        )
+
+    def resolve_alpha(self, p: dict) -> float:
+        """Valor alpha de Alpha Shape en unidades de la nube, según el modo."""
+        return self._resolve_length(
+            p, mode_key="alpha_mode", factor_key="alpha_factor",
+            abs_key="alpha", nombre="alpha",
+        )
+
+    def _resolve_length(self, p: dict, mode_key: str, factor_key: str,
+                        abs_key: str, nombre: str) -> float:
+        """
+        Traduce un parámetro de longitud a unidades de la nube.
+
+        En modo "absolute" avisa si el valor es desproporcionado respecto al
+        objeto: es exactamente el caso que colgaba Ball Pivoting, y conviene
+        que quede constancia en el log antes de que la operación se eternice.
+        """
+        q    = {**self._DEFAULTS, **p}
+        mode = str(q.get(mode_key, "relative")).lower()
+
+        if mode == "absolute":
+            valor = float(q[abs_key])
+            diag  = float(np.linalg.norm(
+                self.pcd.get_max_bound() - self.pcd.get_min_bound()
+            ))
+            if diag > 0 and valor > 0.1 * diag:
+                self._log(f"  ⚠️  {nombre}={valor:.6f} es "
+                          f"{valor / diag:.1f}× la diagonal del objeto "
+                          f"({diag:.6f}). Con valores así el método puede "
+                          f"tardar muchísimo o degenerar; considera el modo "
+                          f"relativo a d̄.")
+            return valor
+
+        factor = float(q[factor_key])
+        return factor * self.characteristic_scale()
 
     # ══════════════════════════════════════════════════════════════
     #  API PÚBLICA
@@ -81,6 +181,9 @@ class MeshReconstructor:
         stats : dict
             Estadísticas con las claves:
             - method
+            - d_bar               (escala característica de la nube de entrada)
+            - bp_radius_used      (solo si method == "ball_pivoting")
+            - alpha_used          (solo si method == "alpha_shape")
             - initial_vertices
             - initial_triangles
             - after_webbing_triangles
@@ -95,6 +198,9 @@ class MeshReconstructor:
         # ── Estadísticas acumuladas ────────────────────────────────────────
         stats = {
             "method"                 : p["method"],
+            "d_bar"                  : None,
+            "bp_radius_used"         : None,
+            "alpha_used"             : None,
             "initial_vertices"       : 0,
             "initial_triangles"      : 0,
             "after_webbing_triangles": None,
@@ -104,6 +210,9 @@ class MeshReconstructor:
             "final_triangles"        : 0,
         }
 
+        stats["d_bar"] = self.characteristic_scale()
+        self._log(f"  ℹ️  Escala característica d̄ = {stats['d_bar']:.6f}")
+
         # ── Paso 1: Reconstrucción ─────────────────────────────────────────
         densities = None
 
@@ -111,11 +220,15 @@ class MeshReconstructor:
             self.mesh, densities = self._poisson(int(p["poisson_depth"]))
 
         elif p["method"] == "ball_pivoting":
-            self.mesh = self._ball_pivoting(float(p["bp_radius"]))
+            radius = self.resolve_bp_radius(p)
+            stats["bp_radius_used"] = radius
+            self.mesh = self._ball_pivoting(radius)
 
         elif p["method"] == "alpha_shape":
+            alpha = self.resolve_alpha(p)
+            stats["alpha_used"] = alpha
             self.mesh = self._alpha_shape(
-                float(p["alpha"]),
+                alpha,
                 int(p["alpha_downsample"]),
             )
         else:
@@ -193,7 +306,8 @@ class MeshReconstructor:
 
     def _ball_pivoting(self, radius: float) -> o3d.geometry.TriangleMesh:
         """Ball Pivoting con dos radios (radio y radio×2)."""
-        self._log(f"  ℹ️  Ball Pivoting (radius={radius})...")
+        self._log(f"  ℹ️  Ball Pivoting (radius={radius:.6f} = "
+                  f"{radius / self.characteristic_scale():.1f}·d̄)...")
         radii = o3d.utility.DoubleVector([radius, radius * 2])
         mesh  = o3d.geometry.TriangleMesh \
                     .create_from_point_cloud_ball_pivoting(self.pcd, radii)
@@ -205,7 +319,8 @@ class MeshReconstructor:
         self, alpha: float, downsample_factor: int
     ) -> o3d.geometry.TriangleMesh:
         """Alpha Shape con submuestreo opcional."""
-        self._log(f"  ℹ️  Alpha Shape (alpha={alpha}, "
+        self._log(f"  ℹ️  Alpha Shape (alpha={alpha:.6f} = "
+                  f"{alpha / self.characteristic_scale():.1f}·d̄, "
                   f"downsample={downsample_factor})...")
         pcd_work = (self.pcd.uniform_down_sample(downsample_factor)
                     if downsample_factor > 1 else self.pcd)
@@ -257,6 +372,7 @@ class MeshReconstructor:
         valid_tris        = []
         low_density_count = 0
         far_count         = 0
+        error_count       = 0
 
         for idx, tri in enumerate(triangles):
             try:
@@ -294,6 +410,15 @@ class MeshReconstructor:
 
             except Exception:
                 valid_tris.append(idx)     # conservar si hay error
+                error_count += 1
+
+        # Un fallo suelto es tolerable (se conserva el triángulo), pero un
+        # fallo masivo significa que el filtro no está evaluando nada y el
+        # "0 tri eliminados" del log sería engañoso.
+        if error_count:
+            self._log(f"    ⚠️  {error_count:,} triángulos "
+                      f"({error_count / len(triangles):.1%}) no se pudieron "
+                      f"evaluar y se conservaron")
 
         if not valid_tris:
             self._log("    ⚠️  Filtrado muy agresivo — sin cambios")
@@ -338,8 +463,9 @@ class MeshReconstructor:
         self._log(f"    📏 Radio de análisis (4·d̄): {radius:.6f}, "
                   f"banda muerta ±{gap:.6f}")
 
-        valid_tris = []
-        removed    = 0
+        valid_tris  = []
+        removed     = 0
+        error_count = 0
 
         for idx, tri in enumerate(triangles):
             try:
@@ -377,6 +503,12 @@ class MeshReconstructor:
 
             except Exception:
                 valid_tris.append(idx)
+                error_count += 1
+
+        if error_count:
+            self._log(f"    ⚠️  {error_count:,} triángulos "
+                      f"({error_count / max(len(triangles), 1):.1%}) no se "
+                      f"pudieron evaluar y se conservaron")
 
         if not valid_tris:
             return mesh
