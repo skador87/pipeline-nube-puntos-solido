@@ -155,6 +155,106 @@ Verificado que **no altera `numpy` 2.4.6** ni el resto del entorno validado.
 
 ---
 
+## 5 bis. Escenas grandes: troceado por bloques
+
+### El problema
+
+La grilla de DPSR es **densa y uniforme**, no un octree adaptativo como el
+Poisson de Open3D: la memoria crece con res³. Sobre una GPU de 12 GB:
+
+| Resolución | VRAM de un solo tirón | Viable |
+|---|---|---|
+| 256³ | 0,75 GB | ✅ |
+| 512³ | 6,0 GB | ✅ |
+| 768³ | 20,4 GB | ❌ solo troceado |
+| 1024³ | 48,3 GB | ❌ solo troceado |
+
+Y para una escena hace falta resolución: en el escaneo industrial medido
+(5,02 m de lado mayor), 128³ da celdas de 4,7 cm — una tubería de 10 cm
+tendría 2 celdas de ancho y desaparecería. La regla es **3 celdas mínimo a
+lo ancho del detalle más fino**.
+
+### La solución implementada
+
+Bloques solapados resueltos en GPU y acumulados en una grilla global en RAM
+(1024³ en float32 son 4 GB, asumibles). Cuatro cuidados sin los cuales la
+fusión no funciona:
+
+1. **Halo.** Cada bloque resuelve una región mayor de la que aporta: la FFT
+   impone contorno periódico y el error se concentra en los bordes.
+2. **Escala común.** Cada bloque normaliza χ dividiéndolo por |∇χ| en la
+   superficie, con lo que pasa a ser una distancia con signo. Sin esto,
+   promediar bloques con escalas distintas desplaza el nivel cero.
+3. **Convenio de signo.** Se detecta de qué lado queda el exterior
+   muestreando χ a lo largo de las normales, y se unifica. Corrige de paso
+   los bloques que quedaron con las normales invertidas.
+4. **Máscara de datos.** Cada bloque solo aporta cerca de sus propios
+   puntos. Ver el apartado siguiente: es lo más importante.
+
+Los bloques sin puntos ni se calculan — en una escena, la mayor parte del
+volumen es aire.
+
+### El compromiso que hay que entender
+
+La máscara de datos suprime la superficie inventada en el aire, pero es
+**el mismo mecanismo** con el que Poisson rellena los huecos del muestreo.
+No se pueden tener las dos cosas:
+
+| | Máscara ON | Máscara OFF |
+|---|---|---|
+| Salida | **lámina** fiel a los datos | **macizo** extrapolado |
+| Huecos del escaneo | quedan abiertos | se rellenan |
+| Superficie inventada | ninguna | bastante |
+| Caso correcto | tuberías, paredes, escaneo de un lado | objeto compacto escaneado entero |
+
+Medido sobre el escaneo industrial, activar la máscara bajó el error de
+**6,510 % a 0,558 %** y la superficie inventada de **1,02 m a 6,4 cm**.
+
+Medido sobre el bunny (objeto cerrado, con huecos en la base), la misma
+máscara le quita el 59 % del volumen: se vuelve hueco. Por eso el bunny
+debe reconstruirse **de una sola pasada**, que le sobra.
+
+En la interfaz esto es el desplegable **«Tipo de dato»**, y en `auto` la
+máscara se activa solo al trocear.
+
+### Resultados sobre el escaneo LiDAR industrial
+
+Escena de 4,73 × 5,02 × 3,78 m, 1.213.990 puntos originales (64.841 tras el
+paso A), d̄ = 0,0176 m, 22 agrupaciones separadas.
+
+| Configuración | Triángulos | Cerrada | Fidelidad | Malla→nube | Tiempo |
+|---|---|---|---|---|---|
+| Poisson clásico (bloque B) | 234.535 | ❌ (124 piezas) | **0,174 %** | 1,4 cm | 36 s |
+| DPSR 256³ una pasada | 522.388 | ✅ | 3,128 % | 44,9 cm | 3 s |
+| DPSR 512³ una pasada | 2.126.944 | ✅ | 2,771 % | 40,9 cm | 16 s |
+| DPSR 768³ bloques 256³ | 3.569.154 | ❌ | 0,562 % | 6,5 cm | 42 s |
+| **DPSR 1024³ bloques 256³** | 6.397.936 | ✅ | **0,535 %** | **6,4 cm** | 79 s |
+
+El troceado a 1024³ mejora la pasada única **5×** en fidelidad. El Poisson
+clásico sigue siendo 3× mejor en la media, pero devuelve 124 fragmentos
+abiertos, no un sólido.
+
+### Parámetros recomendados para un escaneo LiDAR industrial
+
+| Parámetro | Valor | Motivo |
+|---|---|---|
+| Resolución | **1024³** (768³ si hay prisa) | celda de 0,6 cm: 3+ celdas en una tubería de 5 cm |
+| Tamaño de bloque | **Automático** (elige 256³) | mayor que quepa en la VRAM libre |
+| Solape | **25 %** | suficiente para que no se vean costuras |
+| Tipo de dato | **Escena abierta (lámina)** | 12× mejor que sin máscara |
+| Conservar solo la pieza mayor | **desactivado** | hay 260 objetos separados; si no, se queda con uno |
+| Suavizado σ | **1,5** | subir solo si aparecen burbujas |
+
+### Límite conocido
+
+Trocear un objeto compacto y cerrado no funciona bien en ninguno de los dos
+modos: con máscara sale hueco (−59 % de volumen), sin máscara sale inflado
+(+369 %). No es un problema en la práctica —un objeto suelto cabe de una
+pasada, donde el resultado es correcto (+0,1 % de volumen)— pero conviene
+saberlo. El modo `auto` evita el caso al no trocear resoluciones pequeñas.
+
+---
+
 ## 6. Qué falta
 
 1. **El bucle de optimización por forma.** Es donde está el valor real de que

@@ -809,9 +809,16 @@ class ParamPanel(QScrollArea):
 
         gdp.addWidget(QLabel("Resolución:"), 0, 0)
         self.dpsr_res = QComboBox()
-        for r in (64, 96, 128, 192, 256):
-            self.dpsr_res.addItem(f"{r}³", r)
-        self.dpsr_res.setCurrentIndex(2)          # 128³
+        for r, etiqueta in ((64,   "64³ — borrador"),
+                            (128,  "128³ — objeto"),
+                            (192,  "192³"),
+                            (256,  "256³ — detalle"),
+                            (384,  "384³"),
+                            (512,  "512³ — escena"),
+                            (768,  "768³ — troceado"),
+                            (1024, "1024³ — troceado")):
+            self.dpsr_res.addItem(etiqueta, r)
+        self.dpsr_res.setCurrentIndex(1)          # 128³
         gdp.addWidget(self.dpsr_res, 0, 1)
 
         gdp.addWidget(QLabel("Suavizado σ:"), 1, 0)
@@ -829,14 +836,57 @@ class ParamPanel(QScrollArea):
             self.dpsr_device.addItem(etiqueta, clave)
         gdp.addWidget(self.dpsr_device, 2, 1)
 
+        gdp.addWidget(QLabel("Tamaño de bloque:"), 3, 0)
+        self.dpsr_block = QComboBox()
+        for etiqueta, valor in (("Automático", 0), ("128³", 128),
+                                ("192³", 192), ("256³", 256),
+                                ("384³", 384), ("512³", 512)):
+            self.dpsr_block.addItem(etiqueta, valor)
+        gdp.addWidget(self.dpsr_block, 3, 1)
+
+        gdp.addWidget(QLabel("Solape entre bloques:"), 4, 0)
+        self.dpsr_overlap = QSpinBox()
+        self.dpsr_overlap.setRange(5, 50)
+        self.dpsr_overlap.setSingleStep(5)
+        self.dpsr_overlap.setValue(25)
+        self.dpsr_overlap.setSuffix(" %")
+        gdp.addWidget(self.dpsr_overlap, 4, 1)
+
+        gdp.addWidget(QLabel("Tipo de dato:"), 5, 0)
+        self.dpsr_data_mask = QComboBox()
+        for etiqueta, clave in (
+                ("Automático",              "auto"),
+                ("Escena abierta (lámina)", "on"),
+                ("Objeto cerrado (macizo)", "off")):
+            self.dpsr_data_mask.addItem(etiqueta, clave)
+        gdp.addWidget(self.dpsr_data_mask, 5, 1)
+
+        self.dpsr_keep_largest = QCheckBox("Conservar solo la pieza mayor")
+        self.dpsr_keep_largest.setChecked(True)
+        gdp.addWidget(self.dpsr_keep_largest, 6, 0, 1, 2)
+
+        self.dpsr_close_border = QCheckBox("Cerrar en el borde del dominio")
+        self.dpsr_close_border.setChecked(True)
+        gdp.addWidget(self.dpsr_close_border, 7, 0, 1, 2)
+
+        self.lbl_dpsr_celda = QLabel("")
+        self.lbl_dpsr_celda.setWordWrap(True)
+        self.lbl_dpsr_celda.setStyleSheet(
+            theme.label_style(theme.TEXT_SUBTLE, theme.FONT_SM))
+        gdp.addWidget(self.lbl_dpsr_celda, 8, 0, 1, 2)
+
         nota_dpsr = QLabel(
-            "ℹ️ La malla sale cerrada por construcción: no hace falta el "
-            "paso C. No usa ningún modelo preentrenado."
+            "ℹ️ No usa ningún modelo preentrenado. Con «objeto cerrado» la "
+            "malla sale maciza y no hace falta el paso C."
         )
         nota_dpsr.setWordWrap(True)
         nota_dpsr.setStyleSheet(
             theme.label_style(theme.TEXT_SUBTLE, theme.FONT_SM))
-        gdp.addWidget(nota_dpsr, 3, 0, 1, 2)
+        gdp.addWidget(nota_dpsr, 9, 0, 1, 2)
+
+        for w in (self.dpsr_res, self.dpsr_block):
+            w.currentIndexChanged.connect(self._on_dpsr_params_changed)
+        self.dpsr_overlap.valueChanged.connect(self._on_dpsr_params_changed)
 
         lay.addWidget(self.g_dpsr)
 
@@ -933,10 +983,49 @@ class ParamPanel(QScrollArea):
                 "construcción, así que no necesita el paso C. No usa "
                 "ningún modelo preentrenado.",
             self.dpsr_res:
-                "Lado de la grilla donde se resuelve la ecuación. Más "
-                "resolución = más detalle pero muchos más triángulos: 64³ "
-                "produce una malla del orden de la del pipeline clásico, "
-                "256³ unas 17 veces más pesada.",
+                "Lado de la grilla donde se resuelve la ecuación. La celda "
+                "resultante debe ser bastante menor que el detalle más fino "
+                "que quieras conservar: como regla, hacen falta 3 celdas a "
+                "lo ancho de una tubería."
+                "<br>Para un objeto suelto bastan 128³–256³. Para una escena "
+                "de varios metros con tuberías hacen falta 512³ o más, que "
+                "se resuelven troceando en bloques.",
+            self.dpsr_block:
+                "Lado del bloque que se resuelve de una vez en la GPU. La "
+                "memoria crece con el cubo del lado: 1024³ pediría unos "
+                "48 GB de golpe, así que se trocea. Cada bloque se resuelve "
+                "por separado y se fusiona con sus vecinos."
+                "<br><b>Automático</b> elige el mayor bloque que quepa en la "
+                "VRAM libre.",
+            self.dpsr_overlap:
+                "Cuánto se solapan los bloques vecinos. El solape es "
+                "necesario porque la FFT impone bordes periódicos y el error "
+                "se concentra en el contorno de cada bloque. Menos solape es "
+                "más rápido; más solape reduce las costuras.",
+            self.dpsr_data_mask:
+                "El compromiso más importante del método al trocear."
+                "<br><b>Escena abierta (lámina)</b>: la superficie sigue a "
+                "los puntos sin inventar envolvente. Sobre un escaneo LiDAR "
+                "industrial baja el error del 6,5 % al 0,56 %. A cambio "
+                "<i>no cierra los huecos del muestreo</i>: el resultado es "
+                "una lámina, no un macizo. Correcto para tuberías, paredes y "
+                "todo lo escaneado por un solo lado."
+                "<br><b>Objeto cerrado (macizo)</b>: deja que Poisson "
+                "extrapole sobre los huecos y devuelva un sólido lleno, a "
+                "costa de inventar superficie donde no hay datos."
+                "<br>No se pueden tener las dos cosas: rellenar huecos e "
+                "inventar envolvente son el mismo mecanismo."
+                "<br><b>Automático</b> usa lámina solo al trocear.",
+            self.dpsr_keep_largest:
+                "Conserva solo la pieza conexa más grande. Útil en un objeto "
+                "aislado, donde el resto son burbujas espurias. "
+                "<b>Desactívalo en escenas con varios objetos separados</b> "
+                "(una planta industrial), o se quedará con uno solo.",
+            self.dpsr_close_border:
+                "Fuerza «exterior» en la capa externa de la grilla. Sin "
+                "esto, si la superficie llega al borde del dominio —típico "
+                "en escenas abiertas, con un suelo que se extiende— la malla "
+                "sale con frontera en vez de cerrada.",
             self.dpsr_sigma:
                 "Ancho del suavizado en el dominio de la frecuencia, en "
                 "celdas. Cumple el papel del suavizado del Poisson clásico. "
@@ -1022,6 +1111,38 @@ class ParamPanel(QScrollArea):
         # el usuario quiere compararlo.
         if metodo == "dpsr":
             self.remove_hollow.setChecked(False)
+
+    def _on_dpsr_params_changed(self, *_):
+        """
+        Avisa de antemano de cuánta memoria pide la configuración elegida y
+        si va a hacer falta trocear. Es la diferencia entre enterarse ahora
+        o tras varios minutos de proceso.
+        """
+        from core.dpsr import memoria_estimada_gb, bloque_automatico
+
+        res    = self.dpsr_res.currentData()
+        bloque = self.dpsr_block.currentData()
+        gb_total = memoria_estimada_gb(res)
+
+        if not bloque:
+            bloque = bloque_automatico(res, "cuda")
+        bloque = min(bloque, res)
+
+        if bloque >= res:
+            self.lbl_dpsr_celda.setText(
+                f"Una sola pasada · ~{gb_total:.1f} GB de VRAM · "
+                f"Poisson global exacto")
+            return
+
+        solape = self.dpsr_overlap.value() / 100.0
+        halo   = max(1, int(round(bloque * solape / 2.0)))
+        nucleo = max(1, bloque - 2 * halo)
+        n_eje  = int(np.ceil(res / nucleo))
+        self.lbl_dpsr_celda.setText(
+            f"Troceado: {n_eje}×{n_eje}×{n_eje} bloques de {bloque}³ · "
+            f"~{memoria_estimada_gb(bloque):.1f} GB por bloque en vez de "
+            f"{gb_total:.1f} GB · los bloques sin puntos se omiten"
+        )
 
     def _on_smooth_method_changed(self, *_):
         """Muestra solo los parámetros del suavizado activo."""
@@ -1231,6 +1352,11 @@ class ParamPanel(QScrollArea):
             "dpsr_resolution"   : self.dpsr_res.currentData(),
             "dpsr_sigma"        : self.dpsr_sigma.value(),
             "dpsr_device"       : self.dpsr_device.currentData(),
+            "dpsr_block_size"   : self.dpsr_block.currentData(),
+            "dpsr_overlap"      : self.dpsr_overlap.value() / 100.0,
+            "dpsr_keep_largest" : self.dpsr_keep_largest.isChecked(),
+            "dpsr_close_border" : self.dpsr_close_border.isChecked(),
+            "dpsr_data_mask"    : self.dpsr_data_mask.currentData(),
             "alpha_mode"        : ("relative"
                                    if self.alpha_mode.currentIndex() == 0
                                    else "absolute"),

@@ -66,9 +66,17 @@ class MeshReconstructor:
         "alpha_downsample"  : 1,
         # DPSR (Poisson diferenciable). σ=1.5 y 128³ es el punto medido con
         # mejor relación fidelidad/peso sobre el bunny; ver docs.
+        # Para escenas grandes (LiDAR industrial) hacen falta 512³ o más,
+        # que solo son viables troceando en bloques.
         "dpsr_resolution"   : 128,
         "dpsr_sigma"        : 1.5,
         "dpsr_device"       : "auto",
+        "dpsr_block_size"   : 0,      # 0 = automático según VRAM libre
+        "dpsr_overlap"      : 0.25,
+        "dpsr_keep_largest" : True,   # desactivar en escenas multiobjeto
+        "dpsr_close_border" : True,
+        # "auto" | "on" (lámina fiel) | "off" (macizo extrapolado)
+        "dpsr_data_mask"    : "auto",
         "remove_webbing"    : True,
         "remove_hollow"     : True,
         "smooth_method"     : "taubin",
@@ -376,6 +384,11 @@ class MeshReconstructor:
             resolution   = int(p["dpsr_resolution"]),
             sigma        = float(p["dpsr_sigma"]),
             device       = None if device == "auto" else device,
+            block_size   = int(p["dpsr_block_size"]),
+            overlap      = float(p["dpsr_overlap"]),
+            keep_largest = bool(p["dpsr_keep_largest"]),
+            close_border = bool(p["dpsr_close_border"]),
+            data_mask    = str(p["dpsr_data_mask"]),
             log_callback = self._log,
         )
         return mesh, stats
